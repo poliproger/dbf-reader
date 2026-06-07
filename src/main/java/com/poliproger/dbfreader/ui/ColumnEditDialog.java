@@ -10,9 +10,11 @@ import com.intellij.util.ui.FormBuilder;
 import com.linuxense.javadbf.DBFDataType;
 import com.poliproger.dbfreader.DbfBundle;
 import com.poliproger.dbfreader.model.DbfColumnDef;
+import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 import javax.swing.JComponent;
+import javax.swing.JList;
 import javax.swing.JPanel;
 import javax.swing.JSpinner;
 import javax.swing.SpinnerNumberModel;
@@ -49,8 +51,13 @@ public final class ColumnEditDialog extends DialogWrapper {
                 ? DbfBundle.message("dialog.column.title.add")
                 : DbfBundle.message("dialog.column.title.edit"));
 
-        typeCombo.setRenderer(SimpleListCellRenderer.create((label, value, index) ->
-                label.setText(value == null ? "" : value.name() + " (" + (char) value.getCode() + ")")));
+        typeCombo.setRenderer(new SimpleListCellRenderer<DBFDataType>() {
+            @Override
+            public void customize(@NotNull JList<? extends DBFDataType> list, DBFDataType value,
+                                  int index, boolean selected, boolean hasFocus) {
+                setText(value == null ? "" : value.name() + " (" + (char) value.getCode() + ")");
+            }
+        });
         typeCombo.addActionListener(e -> syncSpinnerState());
 
         if (existing != null) {

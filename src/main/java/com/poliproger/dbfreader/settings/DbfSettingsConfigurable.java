@@ -7,9 +7,11 @@ import com.intellij.ui.components.JBCheckBox;
 import com.intellij.util.ui.FormBuilder;
 import com.poliproger.dbfreader.DbfBundle;
 import org.jetbrains.annotations.Nls;
+import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 import javax.swing.JComponent;
+import javax.swing.JList;
 import javax.swing.JPanel;
 import java.nio.charset.Charset;
 
@@ -37,8 +39,15 @@ public final class DbfSettingsConfigurable implements Configurable {
         for (Charset cs : DbfSettings.COMMON_CHARSETS) {
             defaultCharsetCombo.addItem(cs);
         }
-        defaultCharsetCombo.setRenderer(SimpleListCellRenderer.create(
-                DbfBundle.message("settings.defaultCharset.systemDefault"), Charset::displayName));
+        defaultCharsetCombo.setRenderer(new SimpleListCellRenderer<Charset>() {
+            @Override
+            public void customize(@NotNull JList<? extends Charset> list, Charset value,
+                                  int index, boolean selected, boolean hasFocus) {
+                setText(value == null
+                        ? DbfBundle.message("settings.defaultCharset.systemDefault")
+                        : value.displayName());
+            }
+        });
         defaultCharsetCombo.setToolTipText(DbfBundle.message("settings.defaultCharset.tooltip"));
 
         panel = FormBuilder.createFormBuilder()
