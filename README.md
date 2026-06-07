@@ -1,8 +1,10 @@
-# DBF Reader
+# DBF Reader — DBF table editor plugin for IntelliJ IDEA & other JetBrains IDEs
 
-An IntelliJ IDEA plugin that opens dBASE/xBase `.dbf` files in a **table editor** for viewing and
-editing — instead of showing them as raw binary. DBF parsing is delegated to the
-[javadbf](https://github.com/albfernandez/javadbf) library.
+An IntelliJ Platform plugin (IntelliJ IDEA and other JetBrains IDEs) that opens dBASE/xBase `.dbf`
+files in a **table editor** for viewing and editing — instead of showing them as raw binary. DBF
+parsing is delegated to the [javadbf](https://github.com/albfernandez/javadbf) library.
+
+![DBF Reader table editor](./images/image1.png)
 
 ## Features
 
