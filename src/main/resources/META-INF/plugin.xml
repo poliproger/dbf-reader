@@ -8,7 +8,7 @@
     <name>DBF Reader</name>
 
     <!-- A displayed Vendor name or Organization ID displayed on the Plugins Page. -->
-    <vendor>poliproger</vendor>
+    <vendor email="dim.polishchuk@gmail.com" url="https://github.com/poliproger/dbf-reader">PoliProger</vendor>
 
     <!-- Description of the plugin displayed on the Plugin Page and IDE Plugin Manager.
          Guidelines: https://plugins.jetbrains.com/docs/marketplace/best-practices-for-listing.html#plugin-description -->
