@@ -1,0 +1,8 @@
+.gradle
+.idea
+.intellijPlatform
+.claude/
+build
+examples/
+notes/
+.DS_Store

@@ -1,0 +1,48 @@
+<!-- Plugin Configuration File. Read more: https://plugins.jetbrains.com/docs/intellij/plugin-configuration-file.html -->
+<idea-plugin>
+    <!-- Unique identifier of the plugin. It should be FQN. It cannot be changed between the plugin versions. -->
+    <id>com.poliproger.dbf-reader</id>
+
+    <!-- Public plugin name should be written in Title Case.
+     Guidelines: https://plugins.jetbrains.com/docs/marketplace/best-practices-for-listing.html#plugin-name -->
+    <name>DBF Reader</name>
+
+    <!-- A displayed Vendor name or Organization ID displayed on the Plugins Page. -->
+    <vendor>poliproger</vendor>
+
+    <!-- Description of the plugin displayed on the Plugin Page and IDE Plugin Manager.
+         Guidelines: https://plugins.jetbrains.com/docs/marketplace/best-practices-for-listing.html#plugin-description -->
+    <description><![CDATA[
+        View and edit dBASE/xBase <code>.dbf</code> files as a table inside the IDE.<br>
+        Supports editing cell values, adding and removing rows and columns, and changing a column's
+        name, data type and size for the C, N, F, L and D field types. Memo and extended types are
+        shown read-only. Powered by the <a href="https://github.com/albfernandez/javadbf">javadbf</a> library.<br>
+        <br>
+        Licensed under the MIT License. Bundles the unmodified
+        <a href="https://github.com/albfernandez/javadbf">javadbf</a> library under the
+        <a href="https://www.gnu.org/licenses/lgpl-3.0.html">LGPL-3.0</a> license; the full license
+        texts and attribution ship in the plugin distribution (THIRD-PARTY-NOTICES.md and licenses/).
+        ]]></description>
+
+    <!-- Product and plugin compatibility requirements.
+         Read more: https://plugins.jetbrains.com/docs/intellij/plugin-compatibility.html -->
+    <depends>com.intellij.modules.platform</depends>
+
+    <resource-bundle>messages.DbfBundle</resource-bundle>
+
+    <!-- Extensions defined by the plugin.
+         Read more: https://plugins.jetbrains.com/docs/intellij/plugin-extension-points.html -->
+    <extensions defaultExtensionNs="com.intellij">
+        <fileType name="DBF File"
+                  implementationClass="com.poliproger.dbfreader.DbfFileType"
+                  fieldName="INSTANCE"
+                  extensions="dbf"/>
+        <fileEditorProvider implementation="com.poliproger.dbfreader.editor.DbfFileEditorProvider"/>
+        <applicationConfigurable parentId="tools"
+                                 id="com.poliproger.dbfreader.settings.DbfSettingsConfigurable"
+                                 instance="com.poliproger.dbfreader.settings.DbfSettingsConfigurable"
+                                 key="settings.displayName"
+                                 bundle="messages.DbfBundle"/>
+    </extensions>
+
+</idea-plugin>
