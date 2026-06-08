@@ -39,6 +39,7 @@ import com.poliproger.dbfreader.ui.DbfHeaderRenderer;
 import com.poliproger.dbfreader.ui.DbfValueFormatter;
 import com.poliproger.dbfreader.ui.RowNumberTable;
 import com.poliproger.dbfreader.ui.cell.DbfCellRenderer;
+import com.poliproger.dbfreader.ui.cell.DbfDateCellEditor;
 import com.poliproger.dbfreader.ui.cell.DbfTextCellEditor;
 import com.linuxense.javadbf.DBFDataType;
 import org.jetbrains.annotations.NotNull;
@@ -365,7 +366,11 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
             }
             column.setCellRenderer(renderer);
             if (def.isWritable()) {
-                column.setCellEditor(new DbfTextCellEditor(def, model.getDocument().getCharset()));
+                if (def.getType() == DBFDataType.DATE) {
+                    column.setCellEditor(new DbfDateCellEditor(def));
+                } else {
+                    column.setCellEditor(new DbfTextCellEditor(def, model.getDocument().getCharset()));
+                }
             }
         }
     }

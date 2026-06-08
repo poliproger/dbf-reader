@@ -6,6 +6,8 @@
 
 ### Added
 
+- Date fields now have a calendar picker: an editing date cell shows a button that opens IntelliJ's
+  native calendar, alongside the existing keyboard entry.
 - Auto-fit column widths to their headers on open and when adding a column.
 - The unsaved-changes prompt shown when closing now names the file and its full path.
 

@@ -12,6 +12,7 @@ import java.nio.CharBuffer;
 import java.nio.charset.Charset;
 import java.nio.charset.CharsetEncoder;
 import java.nio.charset.CodingErrorAction;
+import java.text.ParseException;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 
@@ -53,6 +54,22 @@ public final class DbfValueFormatter {
             default:
                 return value.toString();
         }
+    }
+
+    /**
+     * Parses a {@code yyyy-MM-dd} date string into a {@link Date}, strictly (a malformed or impossible
+     * date such as {@code 2024-02-30} is rejected, not rolled over). Blank input yields {@code null}
+     * (DBF date fields may be empty). Shared by the text and date cell editors so both validate and
+     * store dates identically.
+     */
+    public static @Nullable Date parseDate(@NotNull String text) throws ParseException {
+        String trimmed = text.trim();
+        if (trimmed.isEmpty()) {
+            return null;
+        }
+        SimpleDateFormat sdf = new SimpleDateFormat(DATE_PATTERN);
+        sdf.setLenient(false);
+        return sdf.parse(trimmed);
     }
 
     /**

@@ -22,7 +22,6 @@ import java.awt.event.MouseEvent;
 import java.math.BigDecimal;
 import java.nio.charset.Charset;
 import java.text.ParseException;
-import java.text.SimpleDateFormat;
 import java.util.EventObject;
 
 /**
@@ -102,9 +101,7 @@ public final class DbfTextCellEditor extends AbstractCellEditor implements Table
                 }
                 return bd;
             case DATE:
-                SimpleDateFormat sdf = new SimpleDateFormat(DbfValueFormatter.DATE_PATTERN);
-                sdf.setLenient(false);
-                return sdf.parse(text);
+                return DbfValueFormatter.parseDate(text);
             default:
                 return text;
         }
