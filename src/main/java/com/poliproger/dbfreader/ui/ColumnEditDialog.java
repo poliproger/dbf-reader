@@ -18,6 +18,7 @@ import javax.swing.JList;
 import javax.swing.JPanel;
 import javax.swing.JSpinner;
 import javax.swing.SpinnerNumberModel;
+import java.text.ParseException;
 import java.util.Locale;
 import java.util.Set;
 import java.util.regex.Pattern;
@@ -122,7 +123,7 @@ public final class ColumnEditDialog extends DialogWrapper {
         }
 
         DBFDataType type = getSelectedType();
-        int length = (int) lengthSpinner.getValue();
+        int length = spinnerValue(lengthSpinner);
         int min = type.getMinSize();
         int max = type == DBFDataType.CHARACTER ? 254 : type.getMaxSize();
         if (max <= 0) {
@@ -133,7 +134,7 @@ public final class ColumnEditDialog extends DialogWrapper {
                     DbfBundle.message("dialog.column.error.length", Math.max(1, min), max), lengthSpinner);
         }
         if (type == DBFDataType.NUMERIC || type == DBFDataType.FLOATING_POINT) {
-            int decimals = (int) decimalsSpinner.getValue();
+            int decimals = spinnerValue(decimalsSpinner);
             // With decimals the stored form needs a decimal point plus at least one integer digit, so
             // length must be >= decimals + 2. With no decimals there is no point: length >= 1 (already
             // enforced above) is enough, so a single-digit NUMERIC(1,0) is valid.
@@ -147,9 +148,21 @@ public final class ColumnEditDialog extends DialogWrapper {
     public DbfColumnDef getResult() {
         DBFDataType type = getSelectedType();
         int decimals = (type == DBFDataType.NUMERIC || type == DBFDataType.FLOATING_POINT)
-                ? (int) decimalsSpinner.getValue() : 0;
-        return new DbfColumnDef(normalizedName(), type,
-                (int) lengthSpinner.getValue(), decimals);
+                ? spinnerValue(decimalsSpinner) : 0;
+        return new DbfColumnDef(normalizedName(), type, spinnerValue(lengthSpinner), decimals);
+    }
+
+    /**
+     * Reads a spinner's value, first committing any text the user typed but has not yet confirmed
+     * with Enter or a focus change, so the pending edit is not silently dropped on OK.
+     */
+    private static int spinnerValue(JSpinner spinner) {
+        try {
+            spinner.commitEdit();
+        } catch (ParseException ignored) {
+            // Keep the last valid value; validation rejects anything out of range.
+        }
+        return (int) spinner.getValue();
     }
 
     /** Field name normalized to the DBF convention: trimmed and upper-cased locale-independently. */
