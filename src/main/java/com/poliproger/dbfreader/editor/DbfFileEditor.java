@@ -25,6 +25,7 @@ import com.intellij.ui.components.JBScrollPane;
 import com.intellij.ui.table.JBTable;
 import com.intellij.util.Alarm;
 import com.intellij.util.messages.MessageBusConnection;
+import com.intellij.util.ui.JBUI;
 import com.poliproger.dbfreader.DbfBundle;
 import com.poliproger.dbfreader.io.DbfFileReaderService;
 import com.poliproger.dbfreader.io.DbfFileWriterService;
@@ -44,21 +45,27 @@ import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 import javax.swing.BorderFactory;
+import javax.swing.Icon;
 import javax.swing.JComponent;
 import javax.swing.JPanel;
 import javax.swing.ListSelectionModel;
 import javax.swing.RowFilter;
 import javax.swing.event.DocumentEvent;
+import javax.swing.table.JTableHeader;
+import javax.swing.table.TableCellRenderer;
 import javax.swing.table.TableColumn;
 import javax.swing.table.TableRowSorter;
 import java.awt.BorderLayout;
+import java.awt.Component;
 import java.beans.PropertyChangeListener;
 import java.beans.PropertyChangeSupport;
 import java.io.IOException;
 import java.nio.charset.Charset;
+import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -103,6 +110,7 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
         installHeaderRenderer();
         if (ok) {
             installColumnRenderers();
+            fitColumnWidthsToHeader();
             updateStatus();
         }
         registerSaveShortcut();
@@ -363,12 +371,62 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
     }
 
     /**
+     * Sizes every column to fit its header so the whole header is visible, instead of all columns
+     * starting at the same default width. Runs once when the file is opened.
+     */
+    private void fitColumnWidthsToHeader() {
+        for (int i = 0; i < table.getColumnModel().getColumnCount(); i++) {
+            fitColumnWidthToHeader(i);
+        }
+    }
+
+    /**
+     * Sizes a single column to fit its header — the field name plus the type/size label appended by
+     * {@link DbfHeaderRenderer} (e.g. {@code C (254)}). Measures the header only, never the data cells.
+     */
+    private void fitColumnWidthToHeader(int viewColumn) {
+        JTableHeader header = table.getTableHeader();
+        if (header == null) {
+            return;
+        }
+        TableCellRenderer headerRenderer = header.getDefaultRenderer();
+        TableColumn column = table.getColumnModel().getColumn(viewColumn);
+        Component comp = headerRenderer.getTableCellRendererComponent(
+                table, column.getHeaderValue(), false, false, -1, viewColumn);
+        column.setPreferredWidth(comp.getPreferredSize().width + JBUI.scale(8));
+    }
+
+    /** Snapshots the current preferred width of each column, keyed by field name. */
+    private Map<String, Integer> currentColumnWidths() {
+        Map<String, Integer> widths = new HashMap<>();
+        for (int i = 0; i < table.getColumnModel().getColumnCount(); i++) {
+            TableColumn column = table.getColumnModel().getColumn(i);
+            widths.put(model.getColumnDef(column.getModelIndex()).getName(), column.getPreferredWidth());
+        }
+        return widths;
+    }
+
+    /**
+     * Restores the widths captured by {@link #currentColumnWidths()}, matching columns by field name.
+     * A column with no captured width (e.g. a freshly added one) is left untouched.
+     */
+    private void restoreColumnWidths(Map<String, Integer> widths) {
+        for (int i = 0; i < table.getColumnModel().getColumnCount(); i++) {
+            TableColumn column = table.getColumnModel().getColumn(i);
+            Integer width = widths.get(model.getColumnDef(column.getModelIndex()).getName());
+            if (width != null) {
+                column.setPreferredWidth(width);
+            }
+        }
+    }
+
+    /**
      * Installs the header renderer that appends each field's type/size label in a muted color. Set on
      * the (persistent) {@code JTableHeader} rather than per-column, so it survives the column-model
      * recreation that {@code fireTableStructureChanged()} triggers and needs installing only once.
      */
     private void installHeaderRenderer() {
-        javax.swing.table.JTableHeader header = table.getTableHeader();
+        JTableHeader header = table.getTableHeader();
         if (header != null && !(header.getDefaultRenderer() instanceof DbfHeaderRenderer)) {
             header.setDefaultRenderer(new DbfHeaderRenderer(header.getDefaultRenderer()));
         }
@@ -406,11 +464,18 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
     private void addColumn() {
         stopEditing();
         ColumnEditDialog dialog = new ColumnEditDialog(project, null, columnNames(-1));
-        if (dialog.showAndGet()) {
-            model.addColumn(dialog.getResult(), null);
-            installColumnRenderers();
-            installRowSorter();
+        if (!dialog.showAndGet()) {
+            return;
         }
+        // fireTableStructureChanged() rebuilds the column model and resets every column to the default
+        // width, so capture the current widths, restore them for the existing columns afterwards, and
+        // size only the new (last) column to its header.
+        Map<String, Integer> widths = currentColumnWidths();
+        model.addColumn(dialog.getResult(), null);
+        installColumnRenderers();
+        installRowSorter();
+        restoreColumnWidths(widths);
+        fitColumnWidthToHeader(table.getColumnModel().getColumnCount() - 1);
     }
 
     private void editSelectedColumn() {
@@ -433,9 +498,18 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
                 .collect(Collectors.toList());
         DbfTypeConverter.Result result =
                 DbfTypeConverter.convert(source, oldDef, newDef, model.getDocument().getCharset());
+
+        Map<String, Integer> widths = currentColumnWidths();
+        // The edited column may have been renamed; carry its width over to the new name so the
+        // structural change keeps every column (including this one) at its current width.
+        Integer editedWidth = widths.get(oldDef.getName());
+        if (editedWidth != null) {
+            widths.put(newDef.getName(), editedWidth);
+        }
         model.updateColumn(modelColumn, newDef, result.values);
         installColumnRenderers();
         installRowSorter();
+        restoreColumnWidths(widths);
 
         if (result.clearedCount > 0) {
             Messages.showWarningDialog(project,
@@ -451,9 +525,11 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
             return;
         }
         int modelColumn = table.convertColumnIndexToModel(viewColumn);
+        Map<String, Integer> widths = currentColumnWidths();
         model.removeColumn(modelColumn);
         installColumnRenderers();
         installRowSorter();
+        restoreColumnWidths(widths);
     }
 
     /** Names of all columns except the one at {@code excludeIndex} (use -1 to exclude none). */
@@ -690,7 +766,7 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
 
     /** Common base for toolbar actions; all read Swing state and so update on the EDT. */
     private abstract static class TableAction extends DumbAwareAction {
-        TableAction(String text, String description, javax.swing.Icon icon) {
+        TableAction(String text, String description, Icon icon) {
             super(text, description, icon);
         }
 

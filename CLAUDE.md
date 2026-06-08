@@ -89,3 +89,10 @@ out via the writer on save.
   plugin bundles it into the distribution's `lib/`. License: **LGPL-3.0** (dynamic linking, unmodified).
 - Base package `com.poliproger.dbfreader`; plugin id `com.poliproger.dbf-reader`. UI strings go
   through `DbfBundle` / `messages/DbfBundle.properties`.
+
+## Code style
+
+- **Always import classes; never use fully-qualified class names inline in code.** Add a normal
+  `import` statement and refer to the class by its simple name in method bodies, signatures and
+  declarations (e.g. `JTableHeader header`, not `javax.swing.table.JTableHeader header`). The only
+  exception is when two same-named classes genuinely clash in one file.

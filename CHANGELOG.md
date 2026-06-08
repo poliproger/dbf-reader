@@ -4,6 +4,14 @@
 
 ## Unreleased
 
+### Added
+
+- Auto-fit column widths to their headers on open and when adding a column.
+
+### Fixed
+
+- Editing or deleting a column no longer resets column widths.
+
 ## 1.0.0 - 2026-06-08
 
 ### Added
