@@ -54,6 +54,15 @@ intellijPlatform {
             current()
         }
     }
+
+    // `./gradlew publishPlugin` uploads the built distribution to JetBrains Marketplace, updating
+    // the existing listing (the very first version must be uploaded manually for moderation). The
+    // version published comes from `gradle.properties` (`version=`, must not be a -SNAPSHOT), and
+    // change notes from CHANGELOG.md via pluginConfiguration.changeNotes above. The artifact is not
+    // self-signed here, so Marketplace signs it with its own certificate.
+    publishing {
+        token = providers.environmentVariable("PUBLISH_TOKEN")
+    }
 }
 
 tasks {
