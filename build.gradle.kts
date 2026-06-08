@@ -1,5 +1,6 @@
 import org.gradle.api.tasks.bundling.Zip
 import org.jetbrains.changelog.Changelog
+import org.jetbrains.intellij.platform.gradle.IntelliJPlatformType
 import org.jetbrains.intellij.platform.gradle.TestFrameworkType
 
 plugins {
@@ -41,6 +42,16 @@ intellijPlatform {
                     Changelog.OutputType.HTML,
                 )
             }
+        }
+    }
+
+    // Run the IntelliJ Plugin Verifier against the compatibility-range endpoints: the sinceBuild
+    // floor (2024.2 / build 242) and the platform the plugin is built against (current(), i.e.
+    // 2025.3.5 — reused from the build, no extra download). Run with `./gradlew verifyPlugin`.
+    pluginVerification {
+        ides {
+            create(IntelliJPlatformType.IntellijIdeaCommunity, "2024.2")
+            current()
         }
     }
 }
