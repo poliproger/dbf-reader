@@ -11,6 +11,7 @@
 ### Fixed
 
 - Editing or deleting a column no longer resets column widths.
+- Typing a column size without pressing Enter no longer discards the value when confirming the dialog.
 
 ## 1.0.0 - 2026-06-08
 
