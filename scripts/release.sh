@@ -87,4 +87,4 @@ git commit -m "Start $next development"
 echo
 printf 'Done. Tagged %s on main; artifact under build/distributions/.\n' "$tag"
 printf 'main is now on %s.\n' "$next"
-printf 'Push when ready:  git push origin main && git push origin %s\n' "$tag"
+printf 'Push when ready:  git push github main && git push github %s\n' "$tag"
