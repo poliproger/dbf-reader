@@ -4,6 +4,8 @@
 
 ## Unreleased
 
+## 1.1.0 - 2026-06-09
+
 ### Added
 
 - Date fields now have a calendar picker: an editing date cell shows a button that opens IntelliJ's
