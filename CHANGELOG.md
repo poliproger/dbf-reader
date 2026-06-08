@@ -7,6 +7,7 @@
 ### Added
 
 - Auto-fit column widths to their headers on open and when adding a column.
+- The unsaved-changes prompt shown when closing now names the file and its full path.
 
 ### Fixed
 

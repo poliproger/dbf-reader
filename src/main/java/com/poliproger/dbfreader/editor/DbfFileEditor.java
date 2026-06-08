@@ -700,7 +700,7 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
                     return;
                 }
                 int answer = Messages.showYesNoDialog(project,
-                        DbfBundle.message("save.confirm.message"),
+                        DbfBundle.message("save.confirm.message", closing.getName(), closing.getPresentableUrl()),
                         DbfBundle.message("save.confirm.title"), null);
                 if (answer == Messages.YES) {
                     save();
