@@ -348,12 +348,17 @@ final class DbfSearchController implements CellSearchHighlighter {
         }
         DbfTableModel model = (DbfTableModel) table.getModel();
         if (sorter == null || sorter.getModel() != model) {
-            sorter = new TableRowSorter<>(model);
             // Filtering only: keep the model order, since clicking a header to sort would clash with the
-            // editor's record-oriented row operations.
-            for (int c = 0; c < model.getColumnCount(); c++) {
-                sorter.setSortable(c, false);
-            }
+            // editor's record-oriented row operations. Sorting is blocked by overriding toggleSortOrder
+            // (the header-click entry point) rather than with setSortable(false), because every
+            // fireTableStructureChanged() (add/edit/delete column) runs DefaultRowSorter.allChanged(),
+            // which silently resets the per-column sortable flags back to true.
+            sorter = new TableRowSorter<>(model) {
+                @Override
+                public void toggleSortOrder(int column) {
+                    // no-op: this sorter only filters
+                }
+            };
             table.setRowSorter(sorter);
         }
         sorter.setRowFilter(searchField.getText().isEmpty() ? null : new RowFilter<>() {

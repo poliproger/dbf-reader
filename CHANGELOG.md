@@ -29,6 +29,8 @@
 - The Find shortcut no longer crashes the editor when the file failed to load.
 - The record count in the status bar now updates on every row add/delete, not only on the first
   change after opening or saving.
+- Clicking a column header while the search row filter is active no longer sorts the view after a
+  column was added, edited or deleted.
 
 ## 1.1.0 - 2026-06-09
 
