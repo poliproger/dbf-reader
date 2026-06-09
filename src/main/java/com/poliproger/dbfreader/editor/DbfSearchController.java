@@ -22,6 +22,7 @@ import com.intellij.util.ui.UIUtil;
 import com.poliproger.dbfreader.DbfBundle;
 import com.poliproger.dbfreader.model.DbfTableModel;
 import com.poliproger.dbfreader.ui.DbfTableSearch;
+import com.poliproger.dbfreader.ui.FilterOnlyRowSorter;
 import com.poliproger.dbfreader.ui.cell.CellSearchHighlighter;
 import org.jetbrains.annotations.NotNull;
 
@@ -348,17 +349,10 @@ final class DbfSearchController implements CellSearchHighlighter {
         }
         DbfTableModel model = (DbfTableModel) table.getModel();
         if (sorter == null || sorter.getModel() != model) {
-            // Filtering only: keep the model order, since clicking a header to sort would clash with the
-            // editor's record-oriented row operations. Sorting is blocked by overriding toggleSortOrder
-            // (the header-click entry point) rather than with setSortable(false), because every
-            // fireTableStructureChanged() (add/edit/delete column) runs DefaultRowSorter.allChanged(),
-            // which silently resets the per-column sortable flags back to true.
-            sorter = new TableRowSorter<>(model) {
-                @Override
-                public void toggleSortOrder(int column) {
-                    // no-op: this sorter only filters
-                }
-            };
+            // Filtering only: keep the model order, since clicking a header to sort would clash with
+            // the editor's record-oriented row operations. See FilterOnlyRowSorter for why sorting is
+            // blocked by overriding toggleSortOrder rather than with setSortable(false).
+            sorter = new FilterOnlyRowSorter(model);
             table.setRowSorter(sorter);
         }
         sorter.setRowFilter(searchField.getText().isEmpty() ? null : new RowFilter<>() {

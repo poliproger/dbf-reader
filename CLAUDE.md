@@ -62,11 +62,12 @@ out via the writer on save.
   `AbstractTableModel`), `DbfTypeConverter` (best-effort value conversion on type/size change;
   clears unconvertible values), and `DbfVersion` (header version byte → display name).
 - **`io/`** — `DbfFileReaderService` (via `DBFReader`) and `DbfFileWriterService` (via `DBFWriter`).
-- **`ui/`** — `DbfValueFormatter`, `ColumnEditDialog`, `DbfHeaderRenderer` (field name + muted
-  type/size label), `DbfTableSearch`, `DbfTsvExporter` (Swing-free TSV for the clipboard),
-  `RowNumberTable`, and `ui/cell/` — `DbfCellRenderer` / `DbfBooleanCellRenderer` (search-match
-  shading), `DbfTextCellEditor`, `DbfDateCellEditor` (text field + calendar popup) and
-  `DbfBooleanCellEditor`.
+- **`ui/`** — `DbfValueFormatter`, `ColumnEditDialog` (+ `DbfColumnValidator`, its Swing-free
+  name/length/decimals rules), `DbfHeaderRenderer` (field name + muted type/size label),
+  `DbfTableSearch`, `DbfTsvExporter` (Swing-free TSV for the clipboard), `RowNumberTable`,
+  `FilterOnlyRowSorter` (the filter-mode sorter; blocks header-click sorting even after structure
+  changes), and `ui/cell/` — `DbfCellRenderer` / `DbfBooleanCellRenderer` (search-match shading),
+  `DbfTextCellEditor`, `DbfDateCellEditor` (text field + calendar popup) and `DbfBooleanCellEditor`.
 - **`settings/`** — `DbfSettings` (application-level `PersistentStateComponent`, stored in
   `dbf-reader.xml`) and `DbfSettingsConfigurable` (the Settings | Tools | DBF Reader page).
   Registered via the `applicationConfigurable` extension point in `plugin.xml`.

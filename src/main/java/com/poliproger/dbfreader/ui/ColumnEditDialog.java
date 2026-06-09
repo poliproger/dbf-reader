@@ -21,7 +21,6 @@ import javax.swing.SpinnerNumberModel;
 import java.text.ParseException;
 import java.util.Locale;
 import java.util.Set;
-import java.util.regex.Pattern;
 
 /**
  * Dialog for adding or editing a DBF column. Restricts the type to the set of writable field types
@@ -34,9 +33,6 @@ public final class ColumnEditDialog extends DialogWrapper {
             DBFDataType.CHARACTER, DBFDataType.NUMERIC, DBFDataType.FLOATING_POINT,
             DBFDataType.LOGICAL, DBFDataType.DATE
     };
-
-    private static final Pattern NAME_PATTERN = Pattern.compile("[A-Z0-9_]+");
-    private static final int MAX_NAME = 10;
 
     private final JBTextField nameField = new JBTextField();
     private final ComboBox<DBFDataType> typeCombo = new ComboBox<>(TYPES);
@@ -108,39 +104,19 @@ public final class ColumnEditDialog extends DialogWrapper {
 
     @Override
     protected @Nullable ValidationInfo doValidate() {
-        String name = normalizedName();
-        if (name.isEmpty()) {
-            return new ValidationInfo(DbfBundle.message("dialog.column.error.nameEmpty"), nameField);
-        }
-        if (name.length() > MAX_NAME) {
-            return new ValidationInfo(DbfBundle.message("dialog.column.error.nameTooLong"), nameField);
-        }
-        if (!NAME_PATTERN.matcher(name).matches()) {
-            return new ValidationInfo(DbfBundle.message("dialog.column.error.nameChars"), nameField);
-        }
-        if (otherNames.contains(name)) {
-            return new ValidationInfo(DbfBundle.message("dialog.column.error.nameDuplicate"), nameField);
+        String nameError = DbfColumnValidator.nameError(normalizedName(), otherNames);
+        if (nameError != null) {
+            return new ValidationInfo(DbfBundle.message(nameError), nameField);
         }
 
         DBFDataType type = getSelectedType();
         int length = spinnerValue(lengthSpinner);
-        int min = type.getMinSize();
-        int max = type == DBFDataType.CHARACTER ? 254 : type.getMaxSize();
-        if (max <= 0) {
-            max = 254;
+        if (!DbfColumnValidator.lengthValid(type, length)) {
+            return new ValidationInfo(DbfBundle.message("dialog.column.error.length",
+                    DbfColumnValidator.minLength(type), DbfColumnValidator.maxLength(type)), lengthSpinner);
         }
-        if (length < Math.max(1, min) || length > max) {
-            return new ValidationInfo(
-                    DbfBundle.message("dialog.column.error.length", Math.max(1, min), max), lengthSpinner);
-        }
-        if (type == DBFDataType.NUMERIC || type == DBFDataType.FLOATING_POINT) {
-            int decimals = spinnerValue(decimalsSpinner);
-            // With decimals the stored form needs a decimal point plus at least one integer digit, so
-            // length must be >= decimals + 2. With no decimals there is no point: length >= 1 (already
-            // enforced above) is enough, so a single-digit NUMERIC(1,0) is valid.
-            if (decimals < 0 || (decimals > 0 && decimals > length - 2)) {
-                return new ValidationInfo(DbfBundle.message("dialog.column.error.decimals"), decimalsSpinner);
-            }
+        if (!DbfColumnValidator.decimalsValid(type, length, spinnerValue(decimalsSpinner))) {
+            return new ValidationInfo(DbfBundle.message("dialog.column.error.decimals"), decimalsSpinner);
         }
         return null;
     }
