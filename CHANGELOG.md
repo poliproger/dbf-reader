@@ -4,6 +4,8 @@
 
 ## Unreleased
 
+## 1.2.0 - 2026-06-10
+
 ### Added
 
 - **Find in table (Cmd-F)** — a search bar, opened with Cmd-F or the toolbar Find button, highlights
