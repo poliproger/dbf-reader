@@ -186,6 +186,8 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
         ActionToolbar toolbar = ActionManager.getInstance()
                 .createActionToolbar("DbfEditorToolbar", buildActions(), true);
         toolbar.setTargetComponent(table);
+        // Off by default; without it the toolbar drops the "Row:"/"Col:" separator labels.
+        toolbar.setShowSeparatorTitles(true);
         toolbarRow.add(toolbar.getComponent(), BorderLayout.WEST);
 
         JPanel encodingPanel = new JPanel(new BorderLayout(4, 0));
@@ -239,7 +241,9 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
                         && !DbfFileWriterService.hasUnwritableColumns(model.getDocument()));
             }
         });
-        group.addSeparator();
+        // The row and column groups use the same Add/Remove icons, so label each group's separator
+        // to keep them visually distinguishable.
+        group.addSeparator(DbfBundle.message("toolbar.group.rows"));
         group.add(new TableAction(DbfBundle.message("action.addRow.text"), DbfBundle.message("action.addRow.description"),
                 AllIcons.General.Add) {
             @Override
@@ -264,7 +268,7 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
                 e.getPresentation().setEnabled(!loadError && table.getSelectedRowCount() > 0);
             }
         });
-        group.addSeparator();
+        group.addSeparator(DbfBundle.message("toolbar.group.columns"));
         group.add(new TableAction(DbfBundle.message("action.addColumn.text"), DbfBundle.message("action.addColumn.description"),
                 AllIcons.General.Add) {
             @Override
