@@ -13,11 +13,28 @@
     <!-- Description of the plugin displayed on the Plugin Page and IDE Plugin Manager.
          Guidelines: https://plugins.jetbrains.com/docs/marketplace/best-practices-for-listing.html#plugin-description -->
     <description><![CDATA[
-        View and edit dBASE/xBase <code>.dbf</code> files as a table inside the IDE.<br>
-        Supports editing cell values, adding and removing rows and columns, and changing a column's
-        name, data type and size for the C, N, F, L and D field types. Memo and extended types are
-        shown read-only.<br>
-        <br>
+        View and edit dBASE/xBase <code>.dbf</code> files as a table inside the IDE — instead of
+        raw binary.
+        <ul>
+            <li><b>Table editor</b> — records as rows, fields as columns, with a row-number gutter
+                and a status bar (record count, DBF format variant, active encoding).</li>
+            <li><b>Cell editing</b> for the C, N, F, L and D field types with type-aware editors:
+                a checkbox for logical columns, a calendar picker for dates. Memo and extended
+                types are shown read-only.</li>
+            <li><b>Find in table</b> (the IDE Find shortcut) — highlights all matches with an
+                "N of M" counter; Match Case, Whole Words, Regex and an optional row filter.</li>
+            <li><b>Go to Column</b> (the File Structure shortcut) — a speed-search popup to jump
+                to a field.</li>
+            <li><b>Copy as TSV</b> — copies the selected cells to the clipboard as displayed.</li>
+            <li><b>Row and column operations</b> — add/delete records; add, delete or edit a
+                column's name, data type and size, with best-effort conversion of existing
+                values.</li>
+            <li><b>Encoding handling</b> — auto-detected from the DBF language-driver byte, with a
+                manual override combo box and a configurable default
+                (Settings | Tools | DBF Reader).</li>
+            <li><b>Safe saving</b> — detects external changes on disk and offers to overwrite or
+                reload; optional one-time <code>.bak</code> backup before the first overwrite.</li>
+        </ul>
         Licensed under the MIT License. Bundles third-party libraries under their own licenses;
         the full license texts and attribution ship in the plugin distribution.
         ]]></description>
