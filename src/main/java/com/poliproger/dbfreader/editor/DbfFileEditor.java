@@ -7,6 +7,7 @@ import com.intellij.openapi.actionSystem.ActionUpdateThread;
 import com.intellij.openapi.actionSystem.AnAction;
 import com.intellij.openapi.actionSystem.AnActionEvent;
 import com.intellij.openapi.actionSystem.CustomShortcutSet;
+import com.intellij.openapi.actionSystem.DataContext;
 import com.intellij.openapi.actionSystem.DefaultActionGroup;
 import com.intellij.openapi.actionSystem.ShortcutSet;
 import com.intellij.openapi.command.WriteCommandAction;
@@ -87,6 +88,7 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
     private final JBLabel statusLabel = new JBLabel();
     private final ComboBox<Charset> encodingCombo = new ComboBox<>();
     private final DbfSearchController search = new DbfSearchController(table, this);
+    private final DbfColumnNavigator columnNavigator = new DbfColumnNavigator(table);
 
     private DbfTableModel model;
     private boolean modified;
@@ -112,6 +114,7 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
         }
         registerSaveShortcut();
         registerSearchShortcuts();
+        registerColumnNavShortcut();
         registerCopyShortcut();
         subscribeToClose();
     }
@@ -678,6 +681,18 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
         bindAction("Find", search::activate);
         bindAction("FindNext", search::findNext);
         bindAction("FindPrevious", search::findPrev);
+    }
+
+    /**
+     * Binds column navigation to the IDE File Structure shortcut (e.g. Cmd-F12), reusing whatever the
+     * user's keymap assigns to it. Registered on the panel; the popup needs the action's
+     * {@link DataContext} for best positioning, so it cannot go through {@link #bindAction}.
+     */
+    private void registerColumnNavShortcut() {
+        AnAction action = ActionManager.getInstance().getAction("FileStructurePopup");
+        ShortcutSet shortcuts = action != null ? action.getShortcutSet() : CustomShortcutSet.EMPTY;
+        DumbAwareAction.create(e -> columnNavigator.show(e.getDataContext()))
+                .registerCustomShortcutSet(shortcuts, rootPanel);
     }
 
     /**

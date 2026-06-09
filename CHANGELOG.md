@@ -10,6 +10,8 @@
   every matching cell and lets you step through the matches (Enter / Shift+Enter, or the IDE's Find
   Next/Previous shortcuts) with a "N of M" counter, without hiding any rows. Supports Match Case,
   Whole Words and regular expressions.
+- **Go to Column (Cmd-F12)** — the File Structure shortcut opens a speed-search popup listing every
+  field; start typing to filter and press Enter to jump to that column.
 
 ### Changed
 
