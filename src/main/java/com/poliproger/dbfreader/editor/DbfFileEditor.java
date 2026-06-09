@@ -224,7 +224,7 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
         // panel (see registerSearchShortcuts), so the shortcut is not triggered twice.
         AnAction ideFind = ActionManager.getInstance().getAction("Find");
         if (ideFind != null) {
-            findButton.setShortcutSet(ideFind.getShortcutSet());
+            findButton.copyShortcutFrom(ideFind);
         }
         group.add(findButton);
         group.addSeparator();
