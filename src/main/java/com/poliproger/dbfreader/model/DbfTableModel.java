@@ -4,7 +4,9 @@ import com.linuxense.javadbf.DBFDataType;
 import org.jetbrains.annotations.NotNull;
 
 import javax.swing.table.AbstractTableModel;
+import java.util.Arrays;
 import java.util.List;
+import java.util.Objects;
 
 /**
  * Swing table model backed by a {@link DbfDocument}. Cell edits and structural changes
@@ -65,7 +67,7 @@ public final class DbfTableModel extends AbstractTableModel {
         // changed nothing, so firing unconditionally would mark the file modified just from clicking
         // through cells.
         Object current = document.getRows().get(rowIndex).get(columnIndex);
-        if (java.util.Objects.equals(current, value)) {
+        if (Objects.equals(current, value)) {
             return;
         }
         document.getRows().get(rowIndex).set(columnIndex, value);
@@ -85,7 +87,7 @@ public final class DbfTableModel extends AbstractTableModel {
      */
     public void removeRows(int @NotNull [] modelRows) {
         int[] sorted = modelRows.clone();
-        java.util.Arrays.sort(sorted);
+        Arrays.sort(sorted);
         for (int i = sorted.length - 1; i >= 0; i--) {
             document.removeRow(sorted[i]);
         }

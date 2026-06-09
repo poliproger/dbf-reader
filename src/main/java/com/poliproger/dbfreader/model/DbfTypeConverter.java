@@ -6,6 +6,7 @@ import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.nio.charset.Charset;
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
@@ -67,7 +68,7 @@ public final class DbfTypeConverter {
                             ? (BigDecimal) value
                             : new BigDecimal(value.toString().trim());
                     if (bd.scale() > newDef.getDecimalCount()) {
-                        bd = bd.setScale(newDef.getDecimalCount(), java.math.RoundingMode.HALF_UP);
+                        bd = bd.setScale(newDef.getDecimalCount(), RoundingMode.HALF_UP);
                     }
                     return newDef.fitsNumeric(bd) ? bd : null;
                 } catch (NumberFormatException e) {

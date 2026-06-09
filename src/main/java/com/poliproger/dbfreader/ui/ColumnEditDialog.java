@@ -18,6 +18,7 @@ import javax.swing.JList;
 import javax.swing.JPanel;
 import javax.swing.JSpinner;
 import javax.swing.SpinnerNumberModel;
+import java.awt.Dimension;
 import java.text.ParseException;
 import java.util.Locale;
 import java.util.Set;
@@ -75,7 +76,7 @@ public final class ColumnEditDialog extends DialogWrapper {
                 .addLabeledComponent(DbfBundle.message("dialog.column.length"), lengthSpinner)
                 .addLabeledComponent(DbfBundle.message("dialog.column.decimals"), decimalsSpinner)
                 .getPanel();
-        panel.setPreferredSize(new java.awt.Dimension(320, panel.getPreferredSize().height));
+        panel.setPreferredSize(new Dimension(320, panel.getPreferredSize().height));
         return panel;
     }
 
