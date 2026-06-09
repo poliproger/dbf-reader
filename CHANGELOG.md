@@ -4,6 +4,17 @@
 
 ## Unreleased
 
+### Added
+
+- **Find in table (Cmd-F)** — a search bar, opened with Cmd-F or the toolbar Find button, highlights
+  every matching cell and lets you step through the matches (Enter / Shift+Enter, or the IDE's Find
+  Next/Previous shortcuts) with a "N of M" counter, without hiding any rows. Supports Match Case,
+  Whole Words and regular expressions.
+
+### Changed
+
+- Replaced the row-hiding Filter field with the new Find search bar.
+
 ## 1.1.0 - 2026-06-09
 
 ### Added

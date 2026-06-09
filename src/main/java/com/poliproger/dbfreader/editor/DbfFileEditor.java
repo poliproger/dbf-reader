@@ -4,8 +4,11 @@ import com.intellij.icons.AllIcons;
 import com.intellij.openapi.actionSystem.ActionManager;
 import com.intellij.openapi.actionSystem.ActionToolbar;
 import com.intellij.openapi.actionSystem.ActionUpdateThread;
+import com.intellij.openapi.actionSystem.AnAction;
 import com.intellij.openapi.actionSystem.AnActionEvent;
+import com.intellij.openapi.actionSystem.CustomShortcutSet;
 import com.intellij.openapi.actionSystem.DefaultActionGroup;
+import com.intellij.openapi.actionSystem.ShortcutSet;
 import com.intellij.openapi.command.WriteCommandAction;
 import com.intellij.openapi.fileEditor.FileEditor;
 import com.intellij.openapi.fileEditor.FileEditorManager;
@@ -18,12 +21,9 @@ import com.intellij.openapi.ui.ComboBox;
 import com.intellij.openapi.ui.Messages;
 import com.intellij.openapi.util.UserDataHolderBase;
 import com.intellij.openapi.vfs.VirtualFile;
-import com.intellij.ui.DocumentAdapter;
-import com.intellij.ui.SearchTextField;
 import com.intellij.ui.components.JBLabel;
 import com.intellij.ui.components.JBScrollPane;
 import com.intellij.ui.table.JBTable;
-import com.intellij.util.Alarm;
 import com.intellij.util.messages.MessageBusConnection;
 import com.intellij.util.ui.JBUI;
 import com.poliproger.dbfreader.DbfBundle;
@@ -36,8 +36,8 @@ import com.poliproger.dbfreader.model.DbfTypeConverter;
 import com.poliproger.dbfreader.settings.DbfSettings;
 import com.poliproger.dbfreader.ui.ColumnEditDialog;
 import com.poliproger.dbfreader.ui.DbfHeaderRenderer;
-import com.poliproger.dbfreader.ui.DbfValueFormatter;
 import com.poliproger.dbfreader.ui.RowNumberTable;
+import com.poliproger.dbfreader.ui.cell.DbfBooleanCellRenderer;
 import com.poliproger.dbfreader.ui.cell.DbfCellRenderer;
 import com.poliproger.dbfreader.ui.cell.DbfDateCellEditor;
 import com.poliproger.dbfreader.ui.cell.DbfTextCellEditor;
@@ -50,12 +50,9 @@ import javax.swing.Icon;
 import javax.swing.JComponent;
 import javax.swing.JPanel;
 import javax.swing.ListSelectionModel;
-import javax.swing.RowFilter;
-import javax.swing.event.DocumentEvent;
 import javax.swing.table.JTableHeader;
 import javax.swing.table.TableCellRenderer;
 import javax.swing.table.TableColumn;
-import javax.swing.table.TableRowSorter;
 import java.awt.BorderLayout;
 import java.awt.Component;
 import java.beans.PropertyChangeListener;
@@ -77,9 +74,6 @@ import java.util.stream.Collectors;
  */
 public final class DbfFileEditor extends UserDataHolderBase implements FileEditor {
 
-    /** Debounce so typing in the filter field re-runs the (whole-table) filter pass only once typing pauses. */
-    private static final int FILTER_DELAY_MS = 250;
-
     private final Project project;
     private final VirtualFile file;
     private final PropertyChangeSupport pcs = new PropertyChangeSupport(this);
@@ -88,11 +82,9 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
     private final JBTable table = new JBTable();
     private final JBLabel statusLabel = new JBLabel();
     private final ComboBox<Charset> encodingCombo = new ComboBox<>();
-    private final SearchTextField filterField = new SearchTextField();
-    private final Alarm filterAlarm = new Alarm(Alarm.ThreadToUse.SWING_THREAD, this);
+    private final DbfSearchController search = new DbfSearchController(table, this);
 
     private DbfTableModel model;
-    private TableRowSorter<DbfTableModel> sorter;
     private boolean modified;
     private boolean loadError;
     private boolean backupCreated;
@@ -115,6 +107,7 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
             updateStatus();
         }
         registerSaveShortcut();
+        registerSearchShortcuts();
         subscribeToClose();
     }
 
@@ -125,9 +118,13 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
             DbfDocument document = DbfFileReaderService.read(file.contentsToByteArray(), charsetOverride,
                     DbfSettings.getInstance().resolveDefaultCharset());
             model = new DbfTableModel(document);
+            // Drop any active row filter before swapping the model: the sorter is bound to the old model
+            // and JTable would not rebind it. onModelChanged() below re-applies the filter to the new one.
+            search.detachRowSorter();
             table.setModel(model);
-            installRowSorter();
             model.addTableModelListener(e -> setModified(true));
+            model.addTableModelListener(e -> search.onModelChanged());
+            search.onModelChanged();
             populateEncodingCombo(document.getCharset());
             loadError = false;
             return true;
@@ -170,108 +167,51 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
     }
 
     private JComponent buildTopPanel() {
-        JPanel panel = new JPanel(new BorderLayout());
+        JPanel toolbarRow = new JPanel(new BorderLayout());
 
         ActionToolbar toolbar = ActionManager.getInstance()
                 .createActionToolbar("DbfEditorToolbar", buildActions(), true);
         toolbar.setTargetComponent(table);
-        panel.add(toolbar.getComponent(), BorderLayout.WEST);
-
-        panel.add(buildFilterPanel(), BorderLayout.CENTER);
+        toolbarRow.add(toolbar.getComponent(), BorderLayout.WEST);
 
         JPanel encodingPanel = new JPanel(new BorderLayout(4, 0));
         encodingPanel.setBorder(BorderFactory.createEmptyBorder(0, 8, 0, 8));
         encodingPanel.add(new JBLabel(DbfBundle.message("editor.encoding.label")), BorderLayout.WEST);
         encodingCombo.addActionListener(e -> onEncodingChanged());
         encodingPanel.add(encodingCombo, BorderLayout.EAST);
-        panel.add(encodingPanel, BorderLayout.EAST);
+        toolbarRow.add(encodingPanel, BorderLayout.EAST);
 
-        return panel;
-    }
-
-    // ---- filtering -------------------------------------------------------------------------
-
-    private JComponent buildFilterPanel() {
-        JPanel panel = new JPanel(new BorderLayout(4, 0));
-        panel.setBorder(BorderFactory.createEmptyBorder(0, 8, 0, 8));
-        panel.add(new JBLabel(DbfBundle.message("editor.filter.label")), BorderLayout.WEST);
-        filterField.getTextEditor().getEmptyText().setText(DbfBundle.message("editor.filter.placeholder"));
-        filterField.addDocumentListener(new DocumentAdapter() {
-            @Override
-            protected void textChanged(@NotNull DocumentEvent e) {
-                scheduleFilter();
-            }
-        });
-        panel.add(filterField, BorderLayout.CENTER);
-        return panel;
-    }
-
-    /**
-     * Binds a fresh {@link TableRowSorter} to the current model. Recreated whenever the model is
-     * replaced or its structure changes; sorting is disabled (DBF row order is significant — the
-     * sorter is used purely as the filtering host) and the active filter text is re-applied.
-     */
-    private void installRowSorter() {
-        sorter = new TableRowSorter<>(model);
-        for (int i = 0; i < model.getColumnCount(); i++) {
-            sorter.setSortable(i, false);
-        }
-        table.setRowSorter(sorter);
-        applyFilter();
-    }
-
-    private void scheduleFilter() {
-        filterAlarm.cancelAllRequests();
-        filterAlarm.addRequest(this::applyFilter, FILTER_DELAY_MS);
-    }
-
-    /** Applies the current filter-field text across all columns; an empty query clears the filter. */
-    private void applyFilter() {
-        if (sorter == null) {
-            return;
-        }
-        String query = filterField.getText().trim();
-        sorter.setRowFilter(query.isEmpty() ? null : buildFilter(query));
-        updateStatus();
-    }
-
-    /**
-     * Case-insensitive substring match (ilike {@code %query%}) over every column, comparing against
-     * the value as the user sees it ({@link DbfValueFormatter}) so dates and numbers match their
-     * displayed form rather than their raw {@code toString()}.
-     */
-    private RowFilter<DbfTableModel, Integer> buildFilter(@NotNull String query) {
-        String needle = query.toLowerCase(Locale.ROOT);
-        return new RowFilter<>() {
-            @Override
-            public boolean include(Entry<? extends DbfTableModel, ? extends Integer> entry) {
-                DbfTableModel m = entry.getModel();
-                for (int c = 0; c < entry.getValueCount(); c++) {
-                    Object value = entry.getValue(c);
-                    if (value == null) {
-                        continue;
-                    }
-                    String text = DbfValueFormatter.format(value, m.getColumnDef(c));
-                    if (text.toLowerCase(Locale.ROOT).contains(needle)) {
-                        return true;
-                    }
-                }
-                return false;
-            }
-        };
-    }
-
-    /** Clears the filter (text + row filter) so subsequently added rows are visible and addressable. */
-    private void clearFilter() {
-        filterAlarm.cancelAllRequests();
-        filterField.setText("");
-        if (sorter != null) {
-            sorter.setRowFilter(null);
-        }
+        // Toolbar row on top; the Cmd-F search bar (hidden until activated) sits directly below it.
+        JPanel north = new JPanel(new BorderLayout());
+        north.add(toolbarRow, BorderLayout.NORTH);
+        north.add(search.getComponent(), BorderLayout.SOUTH);
+        return north;
     }
 
     private DefaultActionGroup buildActions() {
         DefaultActionGroup group = new DefaultActionGroup();
+        TableAction findButton = new TableAction(DbfBundle.message("action.find.text"),
+                DbfBundle.message("action.find.description"), AllIcons.Actions.Find) {
+            @Override
+            public void actionPerformed(@NotNull AnActionEvent e) {
+                search.activate();
+            }
+
+            @Override
+            public void update(@NotNull AnActionEvent e) {
+                e.getPresentation().setEnabled(!loadError);
+            }
+        };
+        // Surface the IDE Find shortcut (e.g. Cmd-F) in the button's tooltip. The toolbar's ActionButton
+        // reads the keystroke from the action's own shortcut set, so copy the IDE Find action's shortcuts
+        // onto this button. This is display-only — it binds no handler; the active binding stays on the
+        // panel (see registerSearchShortcuts), so the shortcut is not triggered twice.
+        AnAction ideFind = ActionManager.getInstance().getAction("Find");
+        if (ideFind != null) {
+            findButton.setShortcutSet(ideFind.getShortcutSet());
+        }
+        group.add(findButton);
+        group.addSeparator();
         group.add(new TableAction(DbfBundle.message("action.save.text"), DbfBundle.message("action.save.description"),
                 AllIcons.Actions.MenuSaveall) {
             @Override
@@ -356,12 +296,14 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
      * change because {@code fireTableStructureChanged()} recreates the table's column model.
      */
     private void installColumnRenderers() {
-        DbfCellRenderer renderer = new DbfCellRenderer();
+        DbfCellRenderer renderer = new DbfCellRenderer(search);
         for (int i = 0; i < model.getColumnCount(); i++) {
             DbfColumnDef def = model.getColumnDef(i);
             TableColumn column = table.getColumnModel().getColumn(i);
-            // Logical columns rely on the default Boolean checkbox renderer/editor.
+            // Logical columns keep the default Boolean checkbox editor, but get a renderer wrapping the
+            // default checkbox renderer so search matches are shaded there too.
             if (def.getType() == DBFDataType.LOGICAL) {
+                column.setCellRenderer(new DbfBooleanCellRenderer(table.getDefaultRenderer(Boolean.class), search));
                 continue;
             }
             column.setCellRenderer(renderer);
@@ -441,8 +383,6 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
 
     private void addRow() {
         stopEditing();
-        // Clear any active filter so the new (empty) row is visible and the selection index is valid.
-        clearFilter();
         model.addRow();
         int last = table.convertRowIndexToView(model.getRowCount() - 1);
         if (last >= 0) {
@@ -478,7 +418,7 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
         Map<String, Integer> widths = currentColumnWidths();
         model.addColumn(dialog.getResult(), null);
         installColumnRenderers();
-        installRowSorter();
+        search.onModelChanged();
         restoreColumnWidths(widths);
         fitColumnWidthToHeader(table.getColumnModel().getColumnCount() - 1);
     }
@@ -513,7 +453,7 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
         }
         model.updateColumn(modelColumn, newDef, result.values);
         installColumnRenderers();
-        installRowSorter();
+        search.onModelChanged();
         restoreColumnWidths(widths);
 
         if (result.clearedCount > 0) {
@@ -533,7 +473,7 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
         Map<String, Integer> widths = currentColumnWidths();
         model.removeColumn(modelColumn);
         installColumnRenderers();
-        installRowSorter();
+        search.onModelChanged();
         restoreColumnWidths(widths);
     }
 
@@ -672,9 +612,6 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
         StringBuilder sb = new StringBuilder();
         int total = model.getRowCount();
         sb.append(DbfBundle.message("editor.status.rows", total));
-        if (sorter != null && sorter.getRowFilter() != null) {
-            sb.append("  |  ").append(DbfBundle.message("editor.status.shown", table.getRowCount(), total));
-        }
         int signature = model.getDocument().getSignature();
         sb.append("  |  ").append(DbfBundle.message("editor.status.version",
                 model.getDocument().getVersion().getDisplayName(), String.format("0x%02X", signature & 0xFF)));
@@ -686,11 +623,24 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
     }
 
     private void registerSaveShortcut() {
-        com.intellij.openapi.actionSystem.AnAction saveAll = ActionManager.getInstance().getAction("SaveAll");
-        com.intellij.openapi.actionSystem.ShortcutSet shortcuts = saveAll != null
-                ? saveAll.getShortcutSet()
-                : com.intellij.openapi.actionSystem.CustomShortcutSet.EMPTY;
-        DumbAwareAction.create(e -> save()).registerCustomShortcutSet(shortcuts, rootPanel);
+        bindAction("SaveAll", this::save);
+    }
+
+    /**
+     * Binds the Cmd-F search actions (open / next / previous) to the editor panel, reusing the IDE's
+     * own Find shortcuts so they follow the user's keymap.
+     */
+    private void registerSearchShortcuts() {
+        bindAction("Find", search::activate);
+        bindAction("FindNext", search::findNext);
+        bindAction("FindPrevious", search::findPrev);
+    }
+
+    /** Registers {@code runnable} under the shortcut of the IDE action {@code actionId}, on the panel. */
+    private void bindAction(@NotNull String actionId, @NotNull Runnable runnable) {
+        AnAction action = ActionManager.getInstance().getAction(actionId);
+        ShortcutSet shortcuts = action != null ? action.getShortcutSet() : CustomShortcutSet.EMPTY;
+        DumbAwareAction.create(e -> runnable.run()).registerCustomShortcutSet(shortcuts, rootPanel);
     }
 
     private void subscribeToClose() {
