@@ -10,6 +10,7 @@ import com.intellij.openapi.actionSystem.CustomShortcutSet;
 import com.intellij.openapi.actionSystem.DefaultActionGroup;
 import com.intellij.openapi.actionSystem.ShortcutSet;
 import com.intellij.openapi.command.WriteCommandAction;
+import com.intellij.openapi.ide.CopyPasteManager;
 import com.intellij.openapi.fileEditor.FileEditor;
 import com.intellij.openapi.fileEditor.FileEditorManager;
 import com.intellij.openapi.fileEditor.FileEditorManagerListener;
@@ -36,6 +37,7 @@ import com.poliproger.dbfreader.model.DbfTypeConverter;
 import com.poliproger.dbfreader.settings.DbfSettings;
 import com.poliproger.dbfreader.ui.ColumnEditDialog;
 import com.poliproger.dbfreader.ui.DbfHeaderRenderer;
+import com.poliproger.dbfreader.ui.DbfTsvExporter;
 import com.poliproger.dbfreader.ui.RowNumberTable;
 import com.poliproger.dbfreader.ui.cell.DbfBooleanCellEditor;
 import com.poliproger.dbfreader.ui.cell.DbfBooleanCellRenderer;
@@ -56,6 +58,7 @@ import javax.swing.table.TableCellRenderer;
 import javax.swing.table.TableColumn;
 import java.awt.BorderLayout;
 import java.awt.Component;
+import java.awt.datatransfer.StringSelection;
 import java.beans.PropertyChangeListener;
 import java.beans.PropertyChangeSupport;
 import java.io.IOException;
@@ -109,6 +112,7 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
         }
         registerSaveShortcut();
         registerSearchShortcuts();
+        registerCopyShortcut();
         subscribeToClose();
     }
 
@@ -491,6 +495,38 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
         return names;
     }
 
+    // ---- copy ------------------------------------------------------------------------------
+
+    /** Puts the current cell selection on the clipboard as TSV; a no-op when nothing is selected. */
+    private void copySelectionToClipboard() {
+        String tsv = selectionAsTsv();
+        if (tsv != null) {
+            CopyPasteManager.getInstance().setContents(new StringSelection(tsv));
+        }
+    }
+
+    /**
+     * The current cell selection as tab-separated text, in the on-screen order (honouring an active
+     * row filter and any column reordering), or {@code null} when nothing is selected. Values are
+     * rendered exactly as the table shows them — see {@link DbfTsvExporter}.
+     */
+    private @Nullable String selectionAsTsv() {
+        int[] viewRows = table.getSelectedRows();
+        int[] viewColumns = table.getSelectedColumns();
+        if (viewRows.length == 0 || viewColumns.length == 0) {
+            return null;
+        }
+        int[] modelRows = new int[viewRows.length];
+        for (int i = 0; i < viewRows.length; i++) {
+            modelRows[i] = table.convertRowIndexToModel(viewRows[i]);
+        }
+        int[] modelColumns = new int[viewColumns.length];
+        for (int i = 0; i < viewColumns.length; i++) {
+            modelColumns[i] = table.convertColumnIndexToModel(viewColumns[i]);
+        }
+        return DbfTsvExporter.toTsv(model.getDocument(), modelRows, modelColumns);
+    }
+
     // ---- encoding --------------------------------------------------------------------------
 
     private void onEncodingChanged() {
@@ -642,6 +678,34 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
         bindAction("Find", search::activate);
         bindAction("FindNext", search::findNext);
         bindAction("FindPrevious", search::findPrev);
+    }
+
+    /**
+     * Binds the IDE Copy shortcut (e.g. Cmd-C) to copy the cell selection as TSV. Registered on the
+     * table (not the panel) and disabled while a cell is being edited, so Cmd-C inside the cell editor
+     * still copies the editor's text rather than the whole selection — a disabled action does not
+     * consume the keystroke, letting it fall through to the focused text field.
+     */
+    private void registerCopyShortcut() {
+        AnAction ideCopy = ActionManager.getInstance().getAction("$Copy");
+        ShortcutSet shortcuts = ideCopy != null ? ideCopy.getShortcutSet() : CustomShortcutSet.EMPTY;
+        new DumbAwareAction() {
+            @Override
+            public void actionPerformed(@NotNull AnActionEvent e) {
+                copySelectionToClipboard();
+            }
+
+            @Override
+            public void update(@NotNull AnActionEvent e) {
+                e.getPresentation().setEnabled(!loadError && !table.isEditing()
+                        && table.getSelectedRowCount() > 0 && table.getSelectedColumnCount() > 0);
+            }
+
+            @Override
+            public @NotNull ActionUpdateThread getActionUpdateThread() {
+                return ActionUpdateThread.EDT;
+            }
+        }.registerCustomShortcutSet(shortcuts, table);
     }
 
     /** Registers {@code runnable} under the shortcut of the IDE action {@code actionId}, on the panel. */
