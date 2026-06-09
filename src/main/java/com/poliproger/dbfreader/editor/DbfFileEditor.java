@@ -37,6 +37,7 @@ import com.poliproger.dbfreader.settings.DbfSettings;
 import com.poliproger.dbfreader.ui.ColumnEditDialog;
 import com.poliproger.dbfreader.ui.DbfHeaderRenderer;
 import com.poliproger.dbfreader.ui.RowNumberTable;
+import com.poliproger.dbfreader.ui.cell.DbfBooleanCellEditor;
 import com.poliproger.dbfreader.ui.cell.DbfBooleanCellRenderer;
 import com.poliproger.dbfreader.ui.cell.DbfCellRenderer;
 import com.poliproger.dbfreader.ui.cell.DbfDateCellEditor;
@@ -300,10 +301,12 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
         for (int i = 0; i < model.getColumnCount(); i++) {
             DbfColumnDef def = model.getColumnDef(i);
             TableColumn column = table.getColumnModel().getColumn(i);
-            // Logical columns keep the default Boolean checkbox editor, but get a renderer wrapping the
-            // default checkbox renderer so search matches are shaded there too.
+            // Logical columns use a renderer wrapping the default checkbox renderer (so search matches are
+            // shaded there too) and a checkbox editor that toggles only on a click on the box itself, not
+            // anywhere in the cell.
             if (def.getType() == DBFDataType.LOGICAL) {
                 column.setCellRenderer(new DbfBooleanCellRenderer(table.getDefaultRenderer(Boolean.class), search));
+                column.setCellEditor(new DbfBooleanCellEditor());
                 continue;
             }
             column.setCellRenderer(renderer);

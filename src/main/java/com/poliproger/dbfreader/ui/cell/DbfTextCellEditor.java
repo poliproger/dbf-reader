@@ -27,7 +27,7 @@ import java.util.EventObject;
 /**
  * Text field cell editor that parses the typed text into the proper value type (String, BigDecimal,
  * Date) and rejects invalid input by refusing to stop editing. Character fields are length-limited.
- * Logical fields are not handled here — the table uses the default Boolean checkbox editor for them.
+ * Logical fields are not handled here — the table uses {@link DbfBooleanCellEditor} for them.
  */
 public final class DbfTextCellEditor extends AbstractCellEditor implements TableCellEditor {
 

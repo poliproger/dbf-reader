@@ -69,8 +69,10 @@ out via the writer on save.
   contains any non-writable column, **Save is disabled** (`DbfFileWriterService.hasUnwritableColumns`)
   to prevent data loss. `ColumnEditDialog` only offers the writable types, so converting a memo
   column to e.g. CHARACTER makes the file saveable again.
-- **Logical columns** use the table's default Boolean checkbox renderer/editor (model
-  `getColumnClass` returns `Boolean`); all other types use `DbfCellRenderer` + `DbfTextCellEditor`.
+- **Logical columns** render via the platform Boolean checkbox (model `getColumnClass` returns
+  `Boolean`, wrapped by `DbfBooleanCellRenderer` for search shading) and edit via `DbfBooleanCellEditor`,
+  which toggles only on a click on the checkbox glyph itself — not anywhere in the cell — so selecting a
+  logical cell does not flip its value. All other types use `DbfCellRenderer` + `DbfTextCellEditor`.
 - **Encoding**: resolved by the plugin itself in `DbfFileReaderService.resolveCharset` and passed to
   `DBFReader` explicitly — javadbf's own auto-detection is bypassed because it reads the
   language-driver byte as *signed*, so any code page >= 0x80 (e.g. 0xC9 windows-1251) is misdetected
