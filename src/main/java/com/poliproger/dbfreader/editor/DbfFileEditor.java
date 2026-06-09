@@ -514,8 +514,13 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
             }
         }
         Charset previous = model.getDocument().getCharset();
+        // Re-reading swaps in a fresh model, and table.setModel() rebuilds the column model with default
+        // widths. The structure is unchanged (only character fields decode differently), so capture the
+        // current widths and restore them by field name afterwards.
+        Map<String, Integer> widths = currentColumnWidths();
         if (loadDocument(selected)) {
             installColumnRenderers();
+            restoreColumnWidths(widths);
             setModified(false);
             updateStatus();
         } else {
