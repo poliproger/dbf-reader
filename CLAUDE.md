@@ -42,16 +42,31 @@ out via the writer on save.
 - **`DbfFileType`** (binary) + **`editor/DbfFileEditorProvider`** (`HIDE_DEFAULT_EDITOR`) register the
   `.dbf` association and route opening to the table editor. Wired in `plugin.xml` via the `fileType`
   and `fileEditorProvider` extension points.
-- **`editor/DbfFileEditor`** is the whole UI: a `JBTable` plus a toolbar (Save, add/delete row,
-  add/delete/edit column) and an encoding combo box. Toolbar actions are anonymous `DumbAwareAction`s
-  defined inline (no `plugin.xml` action registration). After any *structural* change it must call
-  `installColumnRenderers()` again, because `fireTableStructureChanged()` recreates the table's
-  column model and drops per-column renderers/editors.
-- **`model/`** — `DbfDocument` (columns + rows + charset), `DbfColumnDef`, `DbfRow` (values stored in
-  a `List` so add/remove-column is cheap), `DbfTableModel` (the `AbstractTableModel`), and
-  `DbfTypeConverter` (best-effort value conversion on type/size change; clears unconvertible values).
+- **`editor/DbfFileEditor`** is the main UI: a `JBTable` plus a toolbar (Find, Save, add/delete row,
+  add/delete/edit column), an encoding combo box, a row-number gutter (`ui/RowNumberTable` as the
+  scroll pane's row header) and a status bar (record count, DBF version, charset, modified flag).
+  Toolbar actions are anonymous `DumbAwareAction`s defined inline (no `plugin.xml` action
+  registration); editor shortcuts reuse the IDE actions' shortcut sets (`bindAction`): SaveAll →
+  save, Find/FindNext/FindPrevious → search, FileStructurePopup → column navigator, $Copy →
+  copy-selection-as-TSV. After any *structural* change it must call `installColumnRenderers()`
+  again, because `fireTableStructureChanged()` recreates the table's column model and drops
+  per-column renderers/editors.
+- **`editor/DbfSearchController`** — the Cmd-F search bar: a debounced match pass over the whole
+  table, match shading via `ui/cell/CellSearchHighlighter`, an "N of M" counter, Match Case / Whole
+  Words / Regex toggles and an optional row filter (a `TableRowSorter` used for *filtering only*,
+  sorting disabled). The sorter must be detached before swapping table models (`detachRowSorter`).
+  The pure matching logic lives in `ui/DbfTableSearch` (Swing-free, tested).
+- **`editor/DbfColumnNavigator`** — the Cmd-F12 "Go to Column" speed-search popup.
+- **`model/`** — `DbfDocument` (columns + rows + charset + header signature byte), `DbfColumnDef`,
+  `DbfRow` (values stored in a `List` so add/remove-column is cheap), `DbfTableModel` (the
+  `AbstractTableModel`), `DbfTypeConverter` (best-effort value conversion on type/size change;
+  clears unconvertible values), and `DbfVersion` (header version byte → display name).
 - **`io/`** — `DbfFileReaderService` (via `DBFReader`) and `DbfFileWriterService` (via `DBFWriter`).
-- **`ui/`** — `DbfValueFormatter`, `ColumnEditDialog`, and `ui/cell/` renderer + text cell editor.
+- **`ui/`** — `DbfValueFormatter`, `ColumnEditDialog`, `DbfHeaderRenderer` (field name + muted
+  type/size label), `DbfTableSearch`, `DbfTsvExporter` (Swing-free TSV for the clipboard),
+  `RowNumberTable`, and `ui/cell/` — `DbfCellRenderer` / `DbfBooleanCellRenderer` (search-match
+  shading), `DbfTextCellEditor`, `DbfDateCellEditor` (text field + calendar popup) and
+  `DbfBooleanCellEditor`.
 - **`settings/`** — `DbfSettings` (application-level `PersistentStateComponent`, stored in
   `dbf-reader.xml`) and `DbfSettingsConfigurable` (the Settings | Tools | DBF Reader page).
   Registered via the `applicationConfigurable` extension point in `plugin.xml`.

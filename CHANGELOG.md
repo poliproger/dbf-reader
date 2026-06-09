@@ -12,10 +12,20 @@
   Whole Words and regular expressions.
 - **Go to Column (Cmd-F12)** — the File Structure shortcut opens a speed-search popup listing every
   field; start typing to filter and press Enter to jump to that column.
+- **Copy as TSV (Cmd-C)** — the IDE Copy shortcut copies the selected cells to the clipboard as
+  tab-separated text, exactly as displayed in the table.
+- **External-change detection on save** — if another program changed the file on disk since it was
+  opened, Save offers to overwrite the file or reload it from disk.
 
 ### Changed
 
 - Replaced the row-hiding Filter field with the new Find search bar.
+
+### Fixed
+
+- Changing the encoding no longer resets column widths.
+- Selecting a logical (checkbox) cell no longer flips its value — only a click on the checkbox
+  glyph itself toggles it.
 
 ## 1.1.0 - 2026-06-09
 

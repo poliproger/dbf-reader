@@ -8,9 +8,19 @@ parsing is delegated to the [javadbf](https://github.com/albfernandez/javadbf) l
 
 ## Features
 
-- **Table editor** — `.dbf` files open as a grid (records as rows, fields as columns).
+- **Table editor** — `.dbf` files open as a grid (records as rows, fields as columns), with a
+  pinned row-number gutter and a status bar showing the record count, the DBF format variant
+  (header version byte) and the active encoding.
 - **Cell editing** for the `C`, `N`, `F`, `L` and `D` field types, with type-aware editors and
-  validation. Logical (`L`) columns use a checkbox.
+  validation. Logical (`L`) columns use a checkbox; date (`D`) cells offer a calendar picker
+  alongside keyboard entry.
+- **Find in table** (the IDE Find shortcut, e.g. Cmd-F) — highlights every matching cell, steps
+  through matches with an "N of M" counter, and supports Match Case, Whole Words, regular
+  expressions and an optional row filter that hides non-matching rows.
+- **Go to Column** (the File Structure shortcut, e.g. Cmd-F12) — a speed-search popup listing
+  every field; pick one to jump to its column.
+- **Copy as TSV** (the IDE Copy shortcut, e.g. Cmd-C) — copies the selected cells to the
+  clipboard as tab-separated text, exactly as displayed.
 - **Row operations** — add and delete records.
 - **Column operations** — add, delete, or edit a column's name, data type and size
   (length/decimals), with best-effort conversion of existing values (unconvertible values are
@@ -19,8 +29,9 @@ parsing is delegated to the [javadbf](https://github.com/albfernandez/javadbf) l
   windows-1252, ISO-8859-1) or let the plugin auto-detect it from the DBF language-driver byte. A
   configurable default (Settings | Tools | DBF Reader) is used when a file declares no code page.
 - **Safe saving** — the whole file is rewritten via javadbf on an explicit Save (toolbar button or
-  the Save-All shortcut). Optionally, a one-time `<name>.dbf.bak` backup is created before the first
-  overwrite (off by default; toggle in settings).
+  the Save-All shortcut). If another program changed the file on disk since it was opened, Save
+  detects it and offers to overwrite or reload. Optionally, a one-time `<name>.dbf.bak` backup is
+  created before the first overwrite (off by default; toggle in settings).
 - **Read-only for unsupported types** — memo and extended field types are shown read-only. Since
   javadbf can only write `C`, `N`, `F`, `L` and `D` columns, Save is disabled while any
   non-writable column is present; converting such a column to a writable type re-enables it.
