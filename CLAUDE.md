@@ -64,6 +64,11 @@ out via the writer on save.
   Optionally, the original is copied to a one-time `<name>.dbf.bak` backup before the first save of a
   session — gated by `DbfSettings.createBackupOnSave`, **off by default** and toggled in
   Settings | Tools | DBF Reader.
+- **External-change detection on save.** Because the model is a detached in-memory copy, another program
+  may overwrite the file while it is open. `DbfFileEditor` keeps a SHA-256 `baselineDigest` of the bytes
+  the model was loaded from (set in `loadDocument`, rebased after each of our own writes). `save()` calls
+  `isModifiedOnDisk()` — which `refresh`es the `VirtualFile` and re-hashes it — and, on a mismatch, offers
+  Overwrite / Reload from Disk (`reloadFromDisk()`, discarding in-memory edits) / Cancel before writing.
 - **javadbf can only *write* the C, N, F, L, D types.** `DbfColumnDef.isWritable()` wraps
   `DBFDataType.isWriteSupported()`. Memo/extended-type columns render read-only; if a document still
   contains any non-writable column, **Save is disabled** (`DbfFileWriterService.hasUnwritableColumns`)

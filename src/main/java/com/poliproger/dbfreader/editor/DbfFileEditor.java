@@ -64,6 +64,9 @@ import java.beans.PropertyChangeListener;
 import java.beans.PropertyChangeSupport;
 import java.io.IOException;
 import java.nio.charset.Charset;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -95,6 +98,12 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
     private boolean loadError;
     private boolean backupCreated;
     private boolean suppressEncodingEvent;
+    /**
+     * SHA-256 of the on-disk file bytes our in-memory model is based on, captured when the document was
+     * loaded and refreshed after each of our own saves. On save we re-hash the current file to detect a
+     * change made by another program since we read it. {@code null} until the first successful load.
+     */
+    private byte @Nullable [] baselineDigest;
 
     public DbfFileEditor(@NotNull Project project, @NotNull VirtualFile file) {
         this.project = project;
@@ -123,8 +132,10 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
 
     private boolean loadDocument(@Nullable Charset charsetOverride) {
         try {
-            DbfDocument document = DbfFileReaderService.read(file.contentsToByteArray(), charsetOverride,
+            byte[] bytes = file.contentsToByteArray();
+            DbfDocument document = DbfFileReaderService.read(bytes, charsetOverride,
                     DbfSettings.getInstance().resolveDefaultCharset());
+            baselineDigest = digest(bytes);
             model = new DbfTableModel(document);
             // Drop any active row filter before swapping the model: the sorter is bound to the old model
             // and JTable would not rebind it. onModelChanged() below re-applies the filter to the new one.
@@ -589,6 +600,25 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
         if (DbfFileWriterService.hasUnwritableColumns(model.getDocument())) {
             return;
         }
+        // Someone may have changed the file on disk since we read it. If so, let the user decide whether
+        // to overwrite it with their edits or reload the on-disk version (discarding the in-memory edits).
+        if (isModifiedOnDisk()) {
+            int answer = Messages.showYesNoCancelDialog(project,
+                    DbfBundle.message("save.conflict.message", file.getName()),
+                    DbfBundle.message("save.conflict.title"),
+                    DbfBundle.message("save.conflict.overwrite"),
+                    DbfBundle.message("save.conflict.reload"),
+                    Messages.getCancelButton(),
+                    Messages.getWarningIcon());
+            if (answer == Messages.NO) {
+                reloadFromDisk();
+                return;
+            }
+            if (answer != Messages.YES) {
+                return;
+            }
+            // YES: fall through and overwrite the file with our version.
+        }
         final byte[] bytes;
         try {
             bytes = DbfFileWriterService.write(model.getDocument());
@@ -612,6 +642,9 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
                             throw new RuntimeException(io);
                         }
                     });
+            // The file on disk is now exactly these bytes; rebase the conflict check so our own save is
+            // not later mistaken for an external change.
+            baselineDigest = digest(bytes);
             setModified(false);
         } catch (RuntimeException ex) {
             Throwable cause = ex.getCause() != null ? ex.getCause() : ex;
@@ -632,6 +665,49 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
             backup = parent.createChildData(this, backupName);
         }
         backup.setBinaryContent(file.contentsToByteArray());
+    }
+
+    /**
+     * Whether the file on disk differs from the bytes our model was loaded from — i.e. another program
+     * changed it in the meantime. Refreshes the VirtualFile from disk first so the check sees the actual
+     * file system state rather than VFS-cached content. Returns {@code false} when there is no baseline
+     * (load failed) or the current bytes cannot be read, so save is never blocked on an inconclusive check.
+     */
+    private boolean isModifiedOnDisk() {
+        if (baselineDigest == null) {
+            return false;
+        }
+        file.refresh(false, false);
+        try {
+            return !Arrays.equals(baselineDigest, digest(file.contentsToByteArray()));
+        } catch (IOException ex) {
+            return false;
+        }
+    }
+
+    /**
+     * Discards the in-memory edits and reloads the document from the current on-disk bytes, preserving the
+     * active encoding and column widths (the structure is normally unchanged). Used when the user opts to
+     * keep the externally changed file instead of overwriting it.
+     */
+    private void reloadFromDisk() {
+        Charset current = model != null ? model.getDocument().getCharset() : null;
+        Map<String, Integer> widths = currentColumnWidths();
+        if (loadDocument(current)) {
+            installColumnRenderers();
+            restoreColumnWidths(widths);
+            setModified(false);
+            updateStatus();
+        }
+    }
+
+    private static byte @NotNull [] digest(byte @NotNull [] bytes) {
+        try {
+            return MessageDigest.getInstance("SHA-256").digest(bytes);
+        } catch (NoSuchAlgorithmException ex) {
+            // SHA-256 is a required algorithm on every JVM, so this never happens.
+            throw new IllegalStateException(ex);
+        }
     }
 
     // ---- helpers ---------------------------------------------------------------------------
