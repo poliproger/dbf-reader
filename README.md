@@ -30,8 +30,10 @@ parsing is delegated to the [javadbf](https://github.com/albfernandez/javadbf) l
   configurable default (Settings | Tools | DBF Reader) is used when a file declares no code page.
 - **Safe saving** — the whole file is rewritten via javadbf on an explicit Save (toolbar button or
   the Save-All shortcut). If another program changed the file on disk since it was opened, Save
-  detects it and offers to overwrite or reload. Optionally, a one-time `<name>.dbf.bak` backup is
-  created before the first overwrite (off by default; toggle in settings).
+  detects it and offers to overwrite or reload. If the file contains records marked as deleted
+  (which are not shown and would be dropped by the rewrite), Save asks for confirmation first.
+  Optionally, a one-time `<name>.dbf.bak` backup is created before the first overwrite (off by
+  default; toggle in settings).
 - **Read-only for unsupported types** — memo and extended field types are shown read-only. Since
   javadbf can only write `C`, `N`, `F`, `L` and `D` columns, Save is disabled while any
   non-writable column is present; converting such a column to a writable type re-enables it.

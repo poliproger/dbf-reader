@@ -624,6 +624,21 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
             }
             // YES: fall through and overwrite the file with our version.
         }
+        // Records marked as deleted are skipped on read and cannot be written back by javadbf, so
+        // rewriting the file removes them permanently. Confirm before that happens; once the file
+        // has been rewritten the count is reset and the question is not asked again.
+        int deleted = model.getDocument().getDeletedRecordCount();
+        if (deleted > 0) {
+            int answer = Messages.showYesNoDialog(project,
+                    DbfBundle.message("save.deleted.message", file.getName(), deleted),
+                    DbfBundle.message("save.deleted.title"),
+                    DbfBundle.message("save.deleted.saveAnyway"),
+                    Messages.getCancelButton(),
+                    Messages.getWarningIcon());
+            if (answer != Messages.YES) {
+                return;
+            }
+        }
         final byte[] bytes;
         try {
             bytes = DbfFileWriterService.write(model.getDocument());
@@ -650,6 +665,9 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
             // The file on disk is now exactly these bytes; rebase the conflict check so our own save is
             // not later mistaken for an external change.
             baselineDigest = digest(bytes);
+            // The rewritten file no longer contains the deleted-marked records, so stop warning
+            // about them (cleared before setModified so the status bar refreshes without them).
+            model.getDocument().setDeletedRecordCount(0);
             setModified(false);
         } catch (RuntimeException ex) {
             Throwable cause = ex.getCause() != null ? ex.getCause() : ex;
@@ -740,6 +758,10 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
         StringBuilder sb = new StringBuilder();
         int total = model.getRowCount();
         sb.append(DbfBundle.message("editor.status.rows", total));
+        int deleted = model.getDocument().getDeletedRecordCount();
+        if (deleted > 0) {
+            sb.append("  |  ").append(DbfBundle.message("editor.status.deleted", deleted));
+        }
         int signature = model.getDocument().getSignature();
         sb.append("  |  ").append(DbfBundle.message("editor.status.version",
                 model.getDocument().getVersion().getDisplayName(), String.format("0x%02X", signature & 0xFF)));

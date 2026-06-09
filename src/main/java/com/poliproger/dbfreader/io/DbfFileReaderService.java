@@ -70,7 +70,12 @@ public final class DbfFileReaderService {
 
             // The first header byte is the format/version flag; javadbf does not expose it.
             int signature = content.length > 0 ? content[0] & 0xFF : -1;
-            return new DbfDocument(columns, rows, charset, signature);
+            DbfDocument document = new DbfDocument(columns, rows, charset, signature);
+            // nextRecord() silently skips records marked as deleted (the '*' flag), while the
+            // header's record count includes them. Record the difference (clamped: a corrupt
+            // header may understate the count) so the UI can warn that saving drops them.
+            document.setDeletedRecordCount(Math.max(0, reader.getRecordCount() - rows.size()));
+            return document;
         } finally {
             if (reader != null) {
                 reader.close();

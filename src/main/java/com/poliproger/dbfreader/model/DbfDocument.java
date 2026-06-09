@@ -17,6 +17,7 @@ public final class DbfDocument {
     private final List<DbfRow> rows;
     private Charset charset;
     private final int signature;
+    private int deletedRecordCount;
 
     public DbfDocument(@NotNull List<DbfColumnDef> columns, @NotNull List<DbfRow> rows, @NotNull Charset charset) {
         this(columns, rows, charset, -1);
@@ -57,6 +58,19 @@ public final class DbfDocument {
     /** The raw header version byte (0..255), or -1 if it was not captured. */
     public int getSignature() {
         return signature;
+    }
+
+    /**
+     * Number of records in the source file that are marked as deleted (the {@code *} flag) and were
+     * skipped on read. They are invisible to this model, and rewriting the file removes them
+     * physically, so the UI warns before the first save while this is non-zero.
+     */
+    public int getDeletedRecordCount() {
+        return deletedRecordCount;
+    }
+
+    public void setDeletedRecordCount(int deletedRecordCount) {
+        this.deletedRecordCount = deletedRecordCount;
     }
 
     /** The DBF format variant derived from the header version byte. */

@@ -16,6 +16,9 @@
   tab-separated text, exactly as displayed in the table.
 - **External-change detection on save** — if another program changed the file on disk since it was
   opened, Save offers to overwrite the file or reload it from disk.
+- **Deleted-records safeguard** — records marked as deleted (the `*` flag) are skipped on read and
+  would be silently removed by a rewrite. The status bar now shows how many such records the file
+  contains, and Save asks for confirmation before dropping them permanently.
 
 ### Changed
 
