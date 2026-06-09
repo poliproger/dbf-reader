@@ -26,6 +26,9 @@
 - Changing the encoding no longer resets column widths.
 - Selecting a logical (checkbox) cell no longer flips its value — only a click on the checkbox
   glyph itself toggles it.
+- The Find shortcut no longer crashes the editor when the file failed to load.
+- The record count in the status bar now updates on every row add/delete, not only on the first
+  change after opening or saving.
 
 ## 1.1.0 - 2026-06-09
 

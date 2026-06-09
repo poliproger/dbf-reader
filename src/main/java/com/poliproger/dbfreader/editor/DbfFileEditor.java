@@ -141,7 +141,12 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
             // and JTable would not rebind it. onModelChanged() below re-applies the filter to the new one.
             search.detachRowSorter();
             table.setModel(model);
-            model.addTableModelListener(e -> setModified(true));
+            model.addTableModelListener(e -> {
+                setModified(true);
+                // setModified only refreshes the status bar when the flag flips, so refresh here
+                // too: the record count must track every row add/delete, not just the first edit.
+                updateStatus();
+            });
             model.addTableModelListener(e -> search.onModelChanged());
             search.onModelChanged();
             populateEncodingCombo(document.getCharset());
@@ -754,7 +759,13 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
      * own Find shortcuts so they follow the user's keymap.
      */
     private void registerSearchShortcuts() {
-        bindAction("Find", search::activate);
+        // Gate on loadError like the toolbar Find button: after a failed load the table still has
+        // its default (non-Dbf) model, which the search controller cannot work on.
+        bindAction("Find", () -> {
+            if (!loadError) {
+                search.activate();
+            }
+        });
         bindAction("FindNext", search::findNext);
         bindAction("FindPrevious", search::findPrev);
     }
