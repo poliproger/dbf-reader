@@ -56,6 +56,10 @@ out via the writer on save.
   Words / Regex toggles and an optional row filter (a `TableRowSorter` used for *filtering only*,
   sorting disabled). The sorter must be detached before swapping table models (`detachRowSorter`).
   The pure matching logic lives in `ui/DbfTableSearch` (Swing-free, tested).
+- **`editor/DbfSaveManager`** — the write-back side of the editor: serializes the document, writes
+  it via `WriteCommandAction` + `setBinaryContent`, makes the optional one-time `.bak` backup and
+  runs the external-change conflict check. `save()` returns a `SaveResult` (SAVED /
+  RELOAD_REQUESTED / CANCELLED) that tells the editor whether to clear its modified flag or reload.
 - **`editor/DbfColumnNavigator`** — the Cmd-F12 "Go to Column" speed-search popup.
 - **`model/`** — `DbfDocument` (columns + rows + charset + header signature byte), `DbfColumnDef`,
   `DbfRow` (values stored in a `List` so add/remove-column is cheap), `DbfTableModel` (the
@@ -81,10 +85,11 @@ out via the writer on save.
   session — gated by `DbfSettings.createBackupOnSave`, **off by default** and toggled in
   Settings | Tools | DBF Reader.
 - **External-change detection on save.** Because the model is a detached in-memory copy, another program
-  may overwrite the file while it is open. `DbfFileEditor` keeps a SHA-256 `baselineDigest` of the bytes
-  the model was loaded from (set in `loadDocument`, rebased after each of our own writes). `save()` calls
-  `isModifiedOnDisk()` — which `refresh`es the `VirtualFile` and re-hashes it — and, on a mismatch, offers
-  Overwrite / Reload from Disk (`reloadFromDisk()`, discarding in-memory edits) / Cancel before writing.
+  may overwrite the file while it is open. `DbfSaveManager` keeps a SHA-256 `baselineDigest` of the bytes
+  the model was loaded from (`rebaseline()`, called from `loadDocument` and after each of our own writes).
+  `save()` calls `isModifiedOnDisk()` — which `refresh`es the `VirtualFile` and re-hashes it — and, on a
+  mismatch, offers Overwrite / Reload from Disk (`DbfFileEditor.reloadFromDisk()`, discarding in-memory
+  edits) / Cancel before writing.
 - **javadbf can only *write* the C, N, F, L, D types.** `DbfColumnDef.isWritable()` wraps
   `DBFDataType.isWriteSupported()`. Memo/extended-type columns render read-only; if a document still
   contains any non-writable column, **Save is disabled** (`DbfFileWriterService.hasUnwritableColumns`)

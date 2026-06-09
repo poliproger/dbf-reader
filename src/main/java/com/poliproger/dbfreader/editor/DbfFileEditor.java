@@ -10,7 +10,6 @@ import com.intellij.openapi.actionSystem.CustomShortcutSet;
 import com.intellij.openapi.actionSystem.DataContext;
 import com.intellij.openapi.actionSystem.DefaultActionGroup;
 import com.intellij.openapi.actionSystem.ShortcutSet;
-import com.intellij.openapi.command.WriteCommandAction;
 import com.intellij.openapi.ide.CopyPasteManager;
 import com.intellij.openapi.fileEditor.FileEditor;
 import com.intellij.openapi.fileEditor.FileEditorManager;
@@ -62,11 +61,7 @@ import java.awt.Component;
 import java.awt.datatransfer.StringSelection;
 import java.beans.PropertyChangeListener;
 import java.beans.PropertyChangeSupport;
-import java.io.IOException;
 import java.nio.charset.Charset;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.util.Arrays;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -92,22 +87,17 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
     private final ComboBox<Charset> encodingCombo = new ComboBox<>();
     private final DbfSearchController search = new DbfSearchController(table, this);
     private final DbfColumnNavigator columnNavigator = new DbfColumnNavigator(table);
+    private final DbfSaveManager saveManager;
 
     private DbfTableModel model;
     private boolean modified;
     private boolean loadError;
-    private boolean backupCreated;
     private boolean suppressEncodingEvent;
-    /**
-     * SHA-256 of the on-disk file bytes our in-memory model is based on, captured when the document was
-     * loaded and refreshed after each of our own saves. On save we re-hash the current file to detect a
-     * change made by another program since we read it. {@code null} until the first successful load.
-     */
-    private byte @Nullable [] baselineDigest;
 
     public DbfFileEditor(@NotNull Project project, @NotNull VirtualFile file) {
         this.project = project;
         this.file = file;
+        this.saveManager = new DbfSaveManager(project, file);
 
         table.setAutoResizeMode(JBTable.AUTO_RESIZE_OFF);
         table.setCellSelectionEnabled(true);
@@ -135,7 +125,7 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
             byte[] bytes = file.contentsToByteArray();
             DbfDocument document = DbfFileReaderService.read(bytes, charsetOverride,
                     DbfSettings.getInstance().resolveDefaultCharset());
-            baselineDigest = digest(bytes);
+            saveManager.rebaseline(bytes);
             model = new DbfTableModel(document);
             // Drop any active row filter before swapping the model: the sorter is bound to the old model
             // and JTable would not rebind it. onModelChanged() below re-applies the filter to the new one.
@@ -605,106 +595,11 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
         if (DbfFileWriterService.hasUnwritableColumns(model.getDocument())) {
             return;
         }
-        // Someone may have changed the file on disk since we read it. If so, let the user decide whether
-        // to overwrite it with their edits or reload the on-disk version (discarding the in-memory edits).
-        if (isModifiedOnDisk()) {
-            int answer = Messages.showYesNoCancelDialog(project,
-                    DbfBundle.message("save.conflict.message", file.getName()),
-                    DbfBundle.message("save.conflict.title"),
-                    DbfBundle.message("save.conflict.overwrite"),
-                    DbfBundle.message("save.conflict.reload"),
-                    Messages.getCancelButton(),
-                    Messages.getWarningIcon());
-            if (answer == Messages.NO) {
-                reloadFromDisk();
-                return;
-            }
-            if (answer != Messages.YES) {
-                return;
-            }
-            // YES: fall through and overwrite the file with our version.
-        }
-        // Records marked as deleted are skipped on read and cannot be written back by javadbf, so
-        // rewriting the file removes them permanently. Confirm before that happens; once the file
-        // has been rewritten the count is reset and the question is not asked again.
-        int deleted = model.getDocument().getDeletedRecordCount();
-        if (deleted > 0) {
-            int answer = Messages.showYesNoDialog(project,
-                    DbfBundle.message("save.deleted.message", file.getName(), deleted),
-                    DbfBundle.message("save.deleted.title"),
-                    DbfBundle.message("save.deleted.saveAnyway"),
-                    Messages.getCancelButton(),
-                    Messages.getWarningIcon());
-            if (answer != Messages.YES) {
-                return;
-            }
-        }
-        final byte[] bytes;
-        try {
-            bytes = DbfFileWriterService.write(model.getDocument());
-        } catch (Exception ex) {
-            Messages.showErrorDialog(project,
-                    ex.getMessage() == null ? ex.toString() : ex.getMessage(),
-                    DbfBundle.message("save.error.title"));
-            return;
-        }
-        try {
-            WriteCommandAction.writeCommandAction(project)
-                    .withName(DbfBundle.message("action.save.text"))
-                    .run(() -> {
-                        try {
-                            if (DbfSettings.getInstance().createBackupOnSave && !backupCreated) {
-                                createBackup();
-                                backupCreated = true;
-                            }
-                            file.setBinaryContent(bytes);
-                        } catch (IOException io) {
-                            throw new RuntimeException(io);
-                        }
-                    });
-            // The file on disk is now exactly these bytes; rebase the conflict check so our own save is
-            // not later mistaken for an external change.
-            baselineDigest = digest(bytes);
-            // The rewritten file no longer contains the deleted-marked records, so stop warning
-            // about them (cleared before setModified so the status bar refreshes without them).
-            model.getDocument().setDeletedRecordCount(0);
+        DbfSaveManager.SaveResult result = saveManager.save(model.getDocument());
+        if (result == DbfSaveManager.SaveResult.SAVED) {
             setModified(false);
-        } catch (RuntimeException ex) {
-            Throwable cause = ex.getCause() != null ? ex.getCause() : ex;
-            Messages.showErrorDialog(project,
-                    cause.getMessage() == null ? cause.toString() : cause.getMessage(),
-                    DbfBundle.message("save.error.title"));
-        }
-    }
-
-    private void createBackup() throws IOException {
-        VirtualFile parent = file.getParent();
-        if (parent == null) {
-            return;
-        }
-        String backupName = file.getName() + ".bak";
-        VirtualFile backup = parent.findChild(backupName);
-        if (backup == null) {
-            backup = parent.createChildData(this, backupName);
-        }
-        backup.setBinaryContent(file.contentsToByteArray());
-    }
-
-    /**
-     * Whether the file on disk differs from the bytes our model was loaded from — i.e. another program
-     * changed it in the meantime. Refreshes the VirtualFile from disk first so the check sees the actual
-     * file system state rather than VFS-cached content. Returns {@code false} when there is no baseline
-     * (load failed) or the current bytes cannot be read, so save is never blocked on an inconclusive check.
-     */
-    private boolean isModifiedOnDisk() {
-        if (baselineDigest == null) {
-            return false;
-        }
-        file.refresh(false, false);
-        try {
-            return !Arrays.equals(baselineDigest, digest(file.contentsToByteArray()));
-        } catch (IOException ex) {
-            return false;
+        } else if (result == DbfSaveManager.SaveResult.RELOAD_REQUESTED) {
+            reloadFromDisk();
         }
     }
 
@@ -721,15 +616,6 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
             restoreColumnWidths(widths);
             setModified(false);
             updateStatus();
-        }
-    }
-
-    private static byte @NotNull [] digest(byte @NotNull [] bytes) {
-        try {
-            return MessageDigest.getInstance("SHA-256").digest(bytes);
-        } catch (NoSuchAlgorithmException ex) {
-            // SHA-256 is a required algorithm on every JVM, so this never happens.
-            throw new IllegalStateException(ex);
         }
     }
 
