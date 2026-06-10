@@ -253,7 +253,8 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
 
             @Override
             public void update(@NotNull AnActionEvent e) {
-                e.getPresentation().setEnabled(!loadError);
+                // A row needs at least one column to hold a value; a freshly created (empty) file has none.
+                e.getPresentation().setEnabled(!loadError && model.getColumnCount() > 0);
             }
         });
         group.add(new TableAction(DbfBundle.message("action.deleteRow.text"), DbfBundle.message("action.deleteRow.description"),
@@ -302,8 +303,7 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
 
             @Override
             public void update(@NotNull AnActionEvent e) {
-                e.getPresentation().setEnabled(!loadError && table.getSelectedColumn() >= 0
-                        && model.getColumnCount() > 1);
+                e.getPresentation().setEnabled(!loadError && table.getSelectedColumn() >= 0);
             }
         });
         return group;
@@ -436,7 +436,13 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
         // width, so capture the current widths, restore them for the existing columns afterwards, and
         // size only the new (last) column to its header.
         Map<String, Integer> widths = currentColumnWidths();
+        // The first column on a freshly created (empty) file makes the table usable; give it a row to
+        // edit right away, so the user does not have to add one manually before entering data.
+        boolean wasEmpty = model.getColumnCount() == 0;
         model.addColumn(dialog.getResult(), null);
+        if (wasEmpty) {
+            model.addRow();
+        }
         installColumnRenderers();
         search.onModelChanged();
         restoreColumnWidths(widths);
@@ -486,12 +492,17 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
     private void deleteSelectedColumn() {
         stopEditing();
         int viewColumn = table.getSelectedColumn();
-        if (viewColumn < 0 || model.getColumnCount() <= 1) {
+        if (viewColumn < 0) {
             return;
         }
         int modelColumn = table.convertColumnIndexToModel(viewColumn);
         Map<String, Integer> widths = currentColumnWidths();
         model.removeColumn(modelColumn);
+        // Deleting the last column leaves the rows field-less; drop them so the file returns to the
+        // clean blank state of a freshly created one (Add Row disabled, ready for new columns again).
+        if (model.getColumnCount() == 0) {
+            model.clearRows();
+        }
         installColumnRenderers();
         search.onModelChanged();
         restoreColumnWidths(widths);

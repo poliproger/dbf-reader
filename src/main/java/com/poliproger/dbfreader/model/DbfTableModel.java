@@ -94,6 +94,18 @@ public final class DbfTableModel extends AbstractTableModel {
         fireTableDataChanged();
     }
 
+    /** Removes every row. Used when the last column is deleted, returning the model to a blank state. */
+    public void clearRows() {
+        int count = document.getRowCount();
+        if (count == 0) {
+            return;
+        }
+        for (int i = count - 1; i >= 0; i--) {
+            document.removeRow(i);
+        }
+        fireTableDataChanged();
+    }
+
     public void addColumn(@NotNull DbfColumnDef column, Object defaultValue) {
         document.addColumn(column, defaultValue);
         fireTableStructureChanged();

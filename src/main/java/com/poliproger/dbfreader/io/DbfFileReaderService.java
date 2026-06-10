@@ -23,6 +23,9 @@ public final class DbfFileReaderService {
     /** Offset of the language-driver (code-page mark) byte in the DBF header. */
     private static final int LANGUAGE_DRIVER_OFFSET = 29;
 
+    /** Header version byte assigned to a freshly created (empty) file: dBASE III, no memo. */
+    private static final int NEW_FILE_SIGNATURE = 0x03;
+
     private DbfFileReaderService() {
     }
 
@@ -49,6 +52,12 @@ public final class DbfFileReaderService {
         // code page >= 0x80 (e.g. 0xC9 windows-1251) is misread and silently falls back to
         // ISO-8859-1 — which also means getCharset() never returns null to signal "undeclared".
         Charset charset = resolveCharset(content, charsetOverride, fallback);
+        // A file created via New File is empty (0 bytes) — there is no header for javadbf to parse,
+        // and feeding it to DBFReader would throw. Open it as a blank document instead, so the editor
+        // shows an empty table the user can build up by adding columns, with no error dialog.
+        if (content.length == 0) {
+            return new DbfDocument(new ArrayList<>(), new ArrayList<>(), charset, NEW_FILE_SIGNATURE);
+        }
         DBFReader reader = null;
         try {
             ByteArrayInputStream in = new ByteArrayInputStream(content);
