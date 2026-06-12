@@ -54,6 +54,9 @@ public final class RowNumberTable extends JBTable
         }
 
         setFocusable(false);
+        // The main table already shows "Nothing to show"; without this the gutter paints its own
+        // copy, clipped to the narrow column width.
+        getEmptyText().setText("");
         setAutoCreateColumnsFromModel(false);
         setSelectionModel(main.getSelectionModel());
         setRowSelectionAllowed(true);
