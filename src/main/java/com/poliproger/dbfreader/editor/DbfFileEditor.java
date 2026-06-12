@@ -191,6 +191,9 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
         // until here, so the empty table is never shown — e.g. while the large-file dialog is up).
         showCard(CARD_TABLE);
         loadingPanel.startLoading();
+        // Disabled rather than gated: onEncodingChanged would silently swallow a selection made while
+        // loading, leaving the combo showing a charset that was never applied. Re-enabled on install.
+        encodingCombo.setEnabled(false);
         Charset fallback = DbfSettings.getInstance().resolveDefaultCharset();
         // A plain pooled thread, deliberately NOT ReadAction.nonBlocking: the read needs no IDE model
         // access (the VFS stream is thread-safe, javadbf parsing is pure), and a multi-second read
@@ -223,8 +226,11 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
             }
             DbfDocument document = DbfFileReaderService.read(bytes, charsetOverride, fallback);
             return LoadResult.success(bytes, document);
-        } catch (Exception e) {
-            return LoadResult.failure(e);
+        } catch (Throwable t) {
+            // Throwable, not Exception: reading a huge file into memory can throw OutOfMemoryError,
+            // and it must still reach installLoaded — otherwise `loading` stays true forever and the
+            // editor is stuck on the spinner with every action disabled.
+            return LoadResult.failure(t);
         }
     }
 
@@ -236,10 +242,14 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
             return;
         }
         loadingPanel.stopLoading();
+        encodingCombo.setEnabled(true);
         if (result.error != null) {
             onFailure.accept(result.error);
             return;
         }
+        // A cell edit begun while the load was in flight belongs to the document being discarded:
+        // cancel it (not commit) so it neither flips the modified flag nor lands in the dropped model.
+        cancelEditing();
         DbfDocument document = result.document;
         saveManager.rebaseline(result.bytes);
         model = new DbfTableModel(document);
@@ -344,6 +354,11 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
         // GridBagLayout with a single child centers it.
         JPanel wrapper = new JPanel(new GridBagLayout());
         wrapper.add(inner);
+        // Same table background as the blank and table cards, so declining a large file does not
+        // flash a differently colored (panel-background) area.
+        Color background = UIUtil.getTableBackground();
+        inner.setBackground(background);
+        wrapper.setBackground(background);
         return wrapper;
     }
 
@@ -371,6 +386,8 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
         encodingPanel.setBorder(BorderFactory.createEmptyBorder(0, 8, 0, 8));
         encodingPanel.add(new JBLabel(DbfBundle.message("editor.encoding.label")), BorderLayout.WEST);
         encodingCombo.addActionListener(e -> onEncodingChanged());
+        // Empty and useless until the first load installs the document's charset; enabled then.
+        encodingCombo.setEnabled(false);
         encodingPanel.add(encodingCombo, BorderLayout.EAST);
         toolbarRow.add(encodingPanel, BorderLayout.EAST);
 
@@ -414,7 +431,10 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
 
             @Override
             public void update(@NotNull AnActionEvent e) {
+                // Column count: javadbf cannot write a document with no fields, so after deleting the
+                // last column the document stays unsaveable until a column is added back.
                 e.getPresentation().setEnabled(editingReady() && modified
+                        && model.getColumnCount() > 0
                         && !DbfFileWriterService.hasUnwritableColumns(model.getDocument()));
             }
         });
@@ -788,7 +808,10 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
         if (!modified) {
             return;
         }
-        if (DbfFileWriterService.hasUnwritableColumns(model.getDocument())) {
+        // javadbf cannot write a document with no fields (DBFWriter.setFields rejects an empty array),
+        // so a fully emptied document is unsaveable — same silent no-op as unwritable columns.
+        if (model.getColumnCount() == 0
+                || DbfFileWriterService.hasUnwritableColumns(model.getDocument())) {
             return;
         }
         DbfSaveManager.SaveResult result = saveManager.save(model.getDocument());
@@ -820,6 +843,13 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
     private void stopEditing() {
         if (table.isEditing() && table.getCellEditor() != null) {
             table.getCellEditor().stopCellEditing();
+        }
+    }
+
+    /** Abandons an in-progress cell edit without committing its value. */
+    private void cancelEditing() {
+        if (table.isEditing() && table.getCellEditor() != null) {
+            table.getCellEditor().cancelCellEditing();
         }
     }
 
@@ -927,10 +957,16 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
         connection.subscribe(FileEditorManagerListener.Before.FILE_EDITOR_MANAGER, new FileEditorManagerListener.Before() {
             @Override
             public void beforeFileClosed(@NotNull FileEditorManager source, @NotNull VirtualFile closing) {
-                if (!closing.equals(file) || !modified || loadError || model == null) {
+                // `loading`: while a (re)load is in flight save() is a silent no-op, so a "save?"
+                // prompt would promise something it cannot deliver — and the pending edits are
+                // already condemned by the reload anyway.
+                if (!closing.equals(file) || !modified || loadError || model == null || loading) {
                     return;
                 }
-                if (DbfFileWriterService.hasUnwritableColumns(model.getDocument())) {
+                // No prompt for documents save() would refuse anyway: zero columns (javadbf cannot
+                // write a document with no fields) or unwritable memo/extended columns.
+                if (model.getColumnCount() == 0
+                        || DbfFileWriterService.hasUnwritableColumns(model.getDocument())) {
                     return;
                 }
                 int answer = Messages.showYesNoDialog(project,
