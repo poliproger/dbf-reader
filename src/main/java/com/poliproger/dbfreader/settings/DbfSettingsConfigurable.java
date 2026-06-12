@@ -2,6 +2,7 @@ package com.poliproger.dbfreader.settings;
 
 import com.intellij.openapi.options.Configurable;
 import com.intellij.openapi.ui.ComboBox;
+import com.intellij.ui.JBIntSpinner;
 import com.intellij.ui.SimpleListCellRenderer;
 import com.intellij.ui.components.JBCheckBox;
 import com.intellij.util.ui.FormBuilder;
@@ -20,8 +21,12 @@ import java.nio.charset.Charset;
  */
 public final class DbfSettingsConfigurable implements Configurable {
 
+    /** Upper bound for the large-file warning threshold spinner (MB). */
+    private static final int MAX_THRESHOLD_MB = 100_000;
+
     private JBCheckBox backupCheckBox;
     private ComboBox<Charset> defaultCharsetCombo;
+    private JBIntSpinner largeFileThresholdSpinner;
     private JPanel panel;
 
     @Override
@@ -50,9 +55,13 @@ public final class DbfSettingsConfigurable implements Configurable {
         });
         defaultCharsetCombo.setToolTipText(DbfBundle.message("settings.defaultCharset.tooltip"));
 
+        largeFileThresholdSpinner = new JBIntSpinner(0, 0, MAX_THRESHOLD_MB);
+        largeFileThresholdSpinner.setToolTipText(DbfBundle.message("settings.largeFile.tooltip"));
+
         panel = FormBuilder.createFormBuilder()
                 .addComponent(backupCheckBox)
                 .addLabeledComponent(DbfBundle.message("settings.defaultCharset.label"), defaultCharsetCombo)
+                .addLabeledComponent(DbfBundle.message("settings.largeFile.label"), largeFileThresholdSpinner)
                 .addComponentFillVertically(new JPanel(), 0)
                 .getPanel();
         return panel;
@@ -62,7 +71,8 @@ public final class DbfSettingsConfigurable implements Configurable {
     public boolean isModified() {
         DbfSettings settings = DbfSettings.getInstance();
         return backupCheckBox.isSelected() != settings.createBackupOnSave
-                || !selectedCharsetName().equals(storedCharsetName(settings));
+                || !selectedCharsetName().equals(storedCharsetName(settings))
+                || largeFileThresholdSpinner.getNumber() != settings.largeFileWarningThresholdMb;
     }
 
     @Override
@@ -70,6 +80,7 @@ public final class DbfSettingsConfigurable implements Configurable {
         DbfSettings settings = DbfSettings.getInstance();
         settings.createBackupOnSave = backupCheckBox.isSelected();
         settings.defaultCharset = selectedCharsetName();
+        settings.largeFileWarningThresholdMb = largeFileThresholdSpinner.getNumber();
     }
 
     @Override
@@ -81,12 +92,14 @@ public final class DbfSettingsConfigurable implements Configurable {
             ensureItem(stored);
         }
         defaultCharsetCombo.setSelectedItem(stored);
+        largeFileThresholdSpinner.setNumber(settings.largeFileWarningThresholdMb);
     }
 
     @Override
     public void disposeUIResources() {
         backupCheckBox = null;
         defaultCharsetCombo = null;
+        largeFileThresholdSpinner = null;
         panel = null;
     }
 

@@ -12,6 +12,7 @@ import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.Arrays;
@@ -140,7 +141,7 @@ final class DbfSaveManager {
         if (backup == null) {
             backup = parent.createChildData(this, backupName);
         }
-        backup.setBinaryContent(file.contentsToByteArray());
+        backup.setBinaryContent(readAllBytes());
     }
 
     /**
@@ -155,9 +156,20 @@ final class DbfSaveManager {
         }
         file.refresh(false, false);
         try {
-            return !Arrays.equals(baselineDigest, digest(file.contentsToByteArray()));
+            return !Arrays.equals(baselineDigest, digest(readAllBytes()));
         } catch (IOException ex) {
             return false;
+        }
+    }
+
+    /**
+     * Reads the whole file via its input stream rather than {@link VirtualFile#contentsToByteArray()},
+     * which throws {@code FileTooBigException} above the IDE content-load limit — exactly the large-file
+     * case this plugin must handle. The stream bypasses that limit.
+     */
+    private byte @NotNull [] readAllBytes() throws IOException {
+        try (InputStream in = file.getInputStream()) {
+            return in.readAllBytes();
         }
     }
 

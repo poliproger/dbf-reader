@@ -50,7 +50,11 @@ out via the writer on save.
   save, Find/FindNext/FindPrevious → search, FileStructurePopup → column navigator, $Copy →
   copy-selection-as-TSV. After any *structural* change it must call `installColumnRenderers()`
   again, because `fireTableStructureChanged()` recreates the table's column model and drops
-  per-column renderers/editors.
+  per-column renderers/editors. The file is read and parsed **off the EDT** (`beginLoad` → a plain
+  pooled thread + `invokeLater`) so a large `.dbf` does not freeze the UI; a `JBLoadingPanel` shows
+  a spinner meanwhile, and the same path serves the initial open, an encoding change and a
+  reload-from-disk. Because the model is now `null` until the background load finishes, every
+  toolbar action / shortcut gates on `editingReady()` (`model != null && !loadError && !loading`).
 - **`editor/DbfSearchController`** — the Cmd-F search bar: a debounced match pass over the whole
   table, match shading via `ui/cell/CellSearchHighlighter`, an "N of M" counter, Match Case / Whole
   Words / Regex toggles and an optional row filter (a `TableRowSorter` used for *filtering only*,
@@ -73,8 +77,9 @@ out via the writer on save.
   changes), and `ui/cell/` — `DbfCellRenderer` / `DbfBooleanCellRenderer` (search-match shading),
   `DbfTextCellEditor`, `DbfDateCellEditor` (text field + calendar popup) and `DbfBooleanCellEditor`.
 - **`settings/`** — `DbfSettings` (application-level `PersistentStateComponent`, stored in
-  `dbf-reader.xml`) and `DbfSettingsConfigurable` (the Settings | Tools | DBF Reader page).
-  Registered via the `applicationConfigurable` extension point in `plugin.xml`.
+  `dbf-reader.xml`: `createBackupOnSave`, `defaultCharset`, `largeFileWarningThresholdMb`) and
+  `DbfSettingsConfigurable` (the Settings | Tools | DBF Reader page). Registered via the
+  `applicationConfigurable` extension point in `plugin.xml`.
 
 ### Constraints that shape the design
 
@@ -84,9 +89,18 @@ out via the writer on save.
   Optionally, the original is copied to a one-time `<name>.dbf.bak` backup before the first save of a
   session — gated by `DbfSettings.createBackupOnSave`, **off by default** and toggled in
   Settings | Tools | DBF Reader.
+- **Background loading + large-file guard.** The whole file is read into memory, so a big `.dbf` is
+  read and parsed off the EDT (`DbfFileEditor.beginLoad`) behind a `JBLoadingPanel` spinner; opening
+  one larger than `DbfSettings.largeFileWarningThresholdMb` (default 20 MB, 0 disables) first asks
+  for confirmation, and declining shows a "Load Anyway" placeholder instead of reading the file. The
+  read runs on a **plain pooled thread, deliberately not `ReadAction.nonBlocking`**: it needs no IDE
+  model access, and a multi-second read action that never calls `checkCanceled()` blocks any pending
+  write action — freezing the EDT (and the spinner) for the whole parse, after which NBRA restarts
+  the cancelled computation from scratch. The `invokeLater` continuation expires on dispose
+  (`o -> disposed`); a `loading` flag prevents a second load from starting while one is in flight.
 - **External-change detection on save.** Because the model is a detached in-memory copy, another program
   may overwrite the file while it is open. `DbfSaveManager` keeps a SHA-256 `baselineDigest` of the bytes
-  the model was loaded from (`rebaseline()`, called from `loadDocument` and after each of our own writes).
+  the model was loaded from (`rebaseline()`, called from `installLoaded` and after each of our own writes).
   `save()` calls `isModifiedOnDisk()` — which `refresh`es the `VirtualFile` and re-hashes it — and, on a
   mismatch, offers Overwrite / Reload from Disk (`DbfFileEditor.reloadFromDisk()`, discarding in-memory
   edits) / Cancel before writing.

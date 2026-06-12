@@ -86,15 +86,16 @@ public final class RowNumberTable extends JBTable
     }
 
     @Override
+    public int getRowHeight() {
+        // Mirror the main table's height directly: each JBTable computes its own row height from its
+        // renderers, and even a 1px difference accumulates into a visible drift on long scrolls.
+        // rowAtPoint() and the total-height math use this flat value, so it must match exactly.
+        return main == null ? super.getRowHeight() : main.getRowHeight();
+    }
+
+    @Override
     public int getRowHeight(int row) {
-        if (main == null) {
-            return super.getRowHeight(row);
-        }
-        int height = main.getRowHeight(row);
-        if (height != super.getRowHeight(row)) {
-            super.setRowHeight(row, height);
-        }
-        return height;
+        return main == null ? super.getRowHeight(row) : main.getRowHeight(row);
     }
 
     @Override
@@ -122,12 +123,21 @@ public final class RowNumberTable extends JBTable
     public void propertyChange(PropertyChangeEvent e) {
         switch (e.getPropertyName()) {
             case "selectionModel" -> setSelectionModel(main.getSelectionModel());
-            case "rowHeight" -> repaint();
+            case "rowHeight" -> {
+                revalidate();
+                repaint();
+            }
             case "model" -> {
                 observedModel.removeTableModelListener(this);
                 observedModel = main.getModel();
                 observedModel.addTableModelListener(this);
+                // The new model usually has a different row count (e.g. the real document swapped in
+                // after the background load replaces the empty initial table), so resize the gutter to
+                // fit the widest number — tableChanged() won't fire for this swap, it listened to the
+                // old model object.
+                adjustWidth();
                 revalidate();
+                repaint();
             }
             case "rowSorter" -> {
                 if (observedSorter != null) {

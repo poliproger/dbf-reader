@@ -10,6 +10,8 @@ import com.intellij.openapi.actionSystem.CustomShortcutSet;
 import com.intellij.openapi.actionSystem.DataContext;
 import com.intellij.openapi.actionSystem.DefaultActionGroup;
 import com.intellij.openapi.actionSystem.ShortcutSet;
+import com.intellij.openapi.application.ApplicationManager;
+import com.intellij.openapi.application.ModalityState;
 import com.intellij.openapi.ide.CopyPasteManager;
 import com.intellij.openapi.fileEditor.FileEditor;
 import com.intellij.openapi.fileEditor.FileEditorManager;
@@ -21,12 +23,16 @@ import com.intellij.openapi.project.Project;
 import com.intellij.openapi.ui.ComboBox;
 import com.intellij.openapi.ui.Messages;
 import com.intellij.openapi.util.UserDataHolderBase;
+import com.intellij.openapi.util.text.StringUtil;
 import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.ui.components.JBLabel;
+import com.intellij.ui.components.JBLoadingPanel;
 import com.intellij.ui.components.JBScrollPane;
 import com.intellij.ui.table.JBTable;
+import com.intellij.util.concurrency.AppExecutorUtil;
 import com.intellij.util.messages.MessageBusConnection;
 import com.intellij.util.ui.JBUI;
+import com.intellij.util.ui.UIUtil;
 import com.poliproger.dbfreader.DbfBundle;
 import com.poliproger.dbfreader.io.DbfFileReaderService;
 import com.poliproger.dbfreader.io.DbfFileWriterService;
@@ -49,7 +55,10 @@ import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 import javax.swing.BorderFactory;
+import javax.swing.Box;
+import javax.swing.BoxLayout;
 import javax.swing.Icon;
+import javax.swing.JButton;
 import javax.swing.JComponent;
 import javax.swing.JPanel;
 import javax.swing.ListSelectionModel;
@@ -57,10 +66,14 @@ import javax.swing.table.JTableHeader;
 import javax.swing.table.TableCellRenderer;
 import javax.swing.table.TableColumn;
 import java.awt.BorderLayout;
+import java.awt.CardLayout;
+import java.awt.Color;
 import java.awt.Component;
+import java.awt.GridBagLayout;
 import java.awt.datatransfer.StringSelection;
 import java.beans.PropertyChangeListener;
 import java.beans.PropertyChangeSupport;
+import java.io.InputStream;
 import java.nio.charset.Charset;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
@@ -68,20 +81,38 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
 /**
  * Table editor for a {@code .dbf} file. Loads the whole file into a {@link DbfDocument}, presents it
  * in a {@link JBTable} with type-aware renderers/editors, and writes the document back on save
  * (javadbf rewrites the file as a whole — there is no in-place editing).
+ *
+ * <p>The file is read and parsed off the EDT ({@link #beginLoad}) so a large {@code .dbf} does not
+ * freeze the UI; a {@link JBLoadingPanel} shows a spinner meanwhile. Opening a file above the
+ * configured size threshold first asks for confirmation (see {@link #openInitial}).
  */
 public final class DbfFileEditor extends UserDataHolderBase implements FileEditor {
+
+    /**
+     * Center cards: a plain dark panel shown until loading actually begins (so opening a file — and
+     * waiting on the large-file confirm dialog — shows only a uniform background, never a half-built
+     * empty table), the table itself (with its loading spinner), and the "not loaded" placeholder.
+     */
+    private static final String CARD_BLANK = "blank";
+    private static final String CARD_TABLE = "table";
+    private static final String CARD_PLACEHOLDER = "placeholder";
+
+    /** Delay before the loading spinner appears, so a fast (small-file) load shows no spinner flicker. */
+    private static final int LOADING_START_DELAY_MS = 250;
 
     private final Project project;
     private final VirtualFile file;
     private final PropertyChangeSupport pcs = new PropertyChangeSupport(this);
 
     private final JPanel rootPanel = new JPanel(new BorderLayout());
+    private final JPanel centerCards = new JPanel(new CardLayout());
     private final JBTable table = new JBTable();
     private final JBLabel statusLabel = new JBLabel();
     private final ComboBox<Charset> encodingCombo = new ComboBox<>();
@@ -89,9 +120,14 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
     private final DbfColumnNavigator columnNavigator = new DbfColumnNavigator(table);
     private final DbfSaveManager saveManager;
 
+    private JBLoadingPanel loadingPanel;
+    private JBLabel notLoadedLabel;
+
     private DbfTableModel model;
     private boolean modified;
     private boolean loadError;
+    private boolean loading;
+    private volatile boolean disposed;
     private boolean suppressEncodingEvent;
 
     public DbfFileEditor(@NotNull Project project, @NotNull VirtualFile file) {
@@ -103,52 +139,136 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
         table.setCellSelectionEnabled(true);
         table.getSelectionModel().setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
 
-        boolean ok = loadDocument(null);
         buildUi();
         installHeaderRenderer();
-        if (ok) {
-            installColumnRenderers();
-            fitColumnWidthsToHeader();
-            updateStatus();
-        }
         registerSaveShortcut();
         registerSearchShortcuts();
         registerColumnNavShortcut();
         registerCopyShortcut();
         subscribeToClose();
+
+        // Load off the EDT so a large file does not freeze the UI. createEditor returns immediately
+        // with the loading spinner showing; the size guard and background read run right after.
+        // nonModal() (not any()): openInitial shows a modal dialog and mutates the model, which must
+        // run in a write-safe context — ModalityState.any() is write-unsafe.
+        ApplicationManager.getApplication().invokeLater(this::openInitial, ModalityState.nonModal(), o -> disposed);
     }
 
     // ---- loading ---------------------------------------------------------------------------
 
-    private boolean loadDocument(@Nullable Charset charsetOverride) {
-        try {
-            byte[] bytes = file.contentsToByteArray();
-            DbfDocument document = DbfFileReaderService.read(bytes, charsetOverride,
-                    DbfSettings.getInstance().resolveDefaultCharset());
-            saveManager.rebaseline(bytes);
-            model = new DbfTableModel(document);
-            // Drop any active row filter before swapping the model: the sorter is bound to the old model
-            // and JTable would not rebind it. onModelChanged() below re-applies the filter to the new one.
-            search.detachRowSorter();
-            table.setModel(model);
-            model.addTableModelListener(e -> {
-                setModified(true);
-                // setModified only refreshes the status bar when the flag flips, so refresh here
-                // too: the record count must track every row add/delete, not just the first edit.
-                updateStatus();
-            });
-            model.addTableModelListener(e -> search.onModelChanged());
-            search.onModelChanged();
-            populateEncodingCombo(document.getCharset());
-            loadError = false;
-            return true;
-        } catch (Exception ex) {
-            loadError = true;
-            Messages.showErrorDialog(project,
-                    ex.getMessage() == null ? ex.toString() : ex.getMessage(),
-                    DbfBundle.message("read.error.title"));
-            return false;
+    /**
+     * Decides whether to open the file straight away or warn first, then kicks off the background
+     * load. Runs on the EDT just after construction.
+     */
+    private void openInitial() {
+        if (disposed) {
+            return;
         }
+        long length = file.getLength();
+        int thresholdMb = DbfSettings.getInstance().largeFileWarningThresholdMb;
+        if (thresholdMb > 0 && length > (long) thresholdMb * 1024L * 1024L) {
+            int answer = Messages.showYesNoDialog(project,
+                    DbfBundle.message("largeFile.confirm.message", file.getName(), StringUtil.formatFileSize(length)),
+                    DbfBundle.message("largeFile.confirm.title"), null);
+            if (answer != Messages.YES) {
+                showNotLoadedPlaceholder(length);
+                return;
+            }
+        }
+        beginLoad(null, this::fitColumnWidthsToHeader, this::defaultLoadError);
+    }
+
+    /**
+     * Reads and parses the file on a background thread, then installs the resulting model on the EDT.
+     * Shared by the initial open, an encoding change and a reload-from-disk; the caller supplies what
+     * to run after the model is installed (e.g. fit-to-header vs. restore captured widths) and how to
+     * handle a read failure.
+     */
+    private void beginLoad(@Nullable Charset charsetOverride, @NotNull Runnable afterInstall,
+                           @NotNull Consumer<Throwable> onFailure) {
+        loading = true;
+        // Reveal the table card now that loading is actually starting (it stays hidden behind CARD_BLANK
+        // until here, so the empty table is never shown — e.g. while the large-file dialog is up).
+        showCard(CARD_TABLE);
+        loadingPanel.startLoading();
+        Charset fallback = DbfSettings.getInstance().resolveDefaultCharset();
+        // A plain pooled thread, deliberately NOT ReadAction.nonBlocking: the read needs no IDE model
+        // access (the VFS stream is thread-safe, javadbf parsing is pure), and a multi-second read
+        // action that never calls checkCanceled() blocks any pending write action — freezing the EDT,
+        // and with it the loading spinner, for the whole parse (and NBRA would then restart the
+        // cancelled computation from scratch). The `disposed` expiry condition below replaces
+        // expireWith(); no coalescing is needed — the `loading` flag already prevents a second load
+        // from starting while one is in flight.
+        AppExecutorUtil.getAppExecutorService().execute(() -> {
+            LoadResult result = readDocument(charsetOverride, fallback);
+            // nonModal(), not any(): installLoaded mutates the editor's model in a write-safe context.
+            ApplicationManager.getApplication().invokeLater(
+                    () -> installLoaded(result, afterInstall, onFailure),
+                    ModalityState.nonModal(), o -> disposed);
+        });
+    }
+
+    /**
+     * Reads and parses the file off the EDT. A read/parse failure is captured into the
+     * {@link LoadResult} so it can be reported via a dialog on the UI thread without the platform
+     * logging it as a plugin error.
+     */
+    private @NotNull LoadResult readDocument(@Nullable Charset charsetOverride, @NotNull Charset fallback) {
+        try {
+            // Read via the stream, not contentsToByteArray(): the latter throws FileTooBigException above
+            // the IDE content-load limit — exactly the large-file case this background path exists for.
+            byte[] bytes;
+            try (InputStream in = file.getInputStream()) {
+                bytes = in.readAllBytes();
+            }
+            DbfDocument document = DbfFileReaderService.read(bytes, charsetOverride, fallback);
+            return LoadResult.success(bytes, document);
+        } catch (Exception e) {
+            return LoadResult.failure(e);
+        }
+    }
+
+    /** Installs the freshly loaded model on the EDT, or reports a read failure via {@code onFailure}. */
+    private void installLoaded(@NotNull LoadResult result, @NotNull Runnable afterInstall,
+                               @NotNull Consumer<Throwable> onFailure) {
+        loading = false;
+        if (disposed) {
+            return;
+        }
+        loadingPanel.stopLoading();
+        if (result.error != null) {
+            onFailure.accept(result.error);
+            return;
+        }
+        DbfDocument document = result.document;
+        saveManager.rebaseline(result.bytes);
+        model = new DbfTableModel(document);
+        // Drop any active row filter before swapping the model: the sorter is bound to the old model
+        // and JTable would not rebind it. search.onModelChanged() below re-applies it to the new one.
+        search.detachRowSorter();
+        table.setModel(model);
+        model.addTableModelListener(e -> {
+            setModified(true);
+            // setModified only refreshes the status bar when the flag flips, so refresh here too:
+            // the record count must track every row add/delete, not just the first edit.
+            updateStatus();
+        });
+        model.addTableModelListener(e -> search.onModelChanged());
+        search.onModelChanged();
+        populateEncodingCombo(document.getCharset());
+        loadError = false;
+        installColumnRenderers();
+        afterInstall.run();
+        updateStatus();
+    }
+
+    /** Default read-failure handling: mark the editor errored and show the message. */
+    private void defaultLoadError(@NotNull Throwable error) {
+        loadError = true;
+        Messages.showErrorDialog(project,
+                error.getMessage() == null ? error.toString() : error.getMessage(),
+                DbfBundle.message("read.error.title"));
+        updateStatus();
     }
 
     private void populateEncodingCombo(@NotNull Charset current) {
@@ -166,18 +286,75 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
         suppressEncodingEvent = false;
     }
 
+    /** Whether the document is loaded and editable — gates the toolbar actions and shortcuts. */
+    private boolean editingReady() {
+        return model != null && !loadError && !loading;
+    }
+
     // ---- UI --------------------------------------------------------------------------------
 
     private void buildUi() {
         rootPanel.add(buildTopPanel(), BorderLayout.NORTH);
 
+        // Keep the whole editor in the table's (dark) background from the very first paint, so opening a
+        // file never flashes a light area before the rows appear.
+        Color background = UIUtil.getTableBackground();
+        rootPanel.setBackground(background);
+        centerCards.setBackground(background);
+
         JBScrollPane scrollPane = new JBScrollPane(table);
         // Pinned row-number gutter: scrolls vertically with the table, stays fixed on horizontal scroll.
         scrollPane.setRowHeaderView(new RowNumberTable(table));
-        rootPanel.add(scrollPane, BorderLayout.CENTER);
+        table.setBackground(background);
+        scrollPane.setBackground(background);
+        scrollPane.getViewport().setBackground(background);
+        // startDelay: a load that finishes within it shows no spinner at all (no flicker on small files);
+        // a slow (large-file) load still gets the spinner.
+        loadingPanel = new JBLoadingPanel(new BorderLayout(), this, LOADING_START_DELAY_MS);
+        loadingPanel.setLoadingText(DbfBundle.message("editor.loading.text"));
+        loadingPanel.add(scrollPane, BorderLayout.CENTER);
+
+        // CARD_BLANK is the default (added first): a plain dark panel shown until loading begins, so the
+        // empty/half-built table is never the first thing painted. Switched to CARD_TABLE in beginLoad,
+        // or CARD_PLACEHOLDER when a large file is declined.
+        JPanel blankCard = new JPanel();
+        blankCard.setBackground(background);
+        centerCards.add(blankCard, CARD_BLANK);
+        centerCards.add(loadingPanel, CARD_TABLE);
+        centerCards.add(buildNotLoadedPlaceholder(), CARD_PLACEHOLDER);
+        rootPanel.add(centerCards, BorderLayout.CENTER);
 
         statusLabel.setBorder(BorderFactory.createEmptyBorder(2, 8, 2, 8));
         rootPanel.add(statusLabel, BorderLayout.SOUTH);
+    }
+
+    /** The card shown when the user declines to open a large file: a note plus a "Load Anyway" button. */
+    private JComponent buildNotLoadedPlaceholder() {
+        notLoadedLabel = new JBLabel();
+        notLoadedLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
+        JButton loadAnyway = new JButton(DbfBundle.message("largeFile.placeholder.load"));
+        loadAnyway.setAlignmentX(Component.CENTER_ALIGNMENT);
+        // beginLoad switches to CARD_TABLE itself.
+        loadAnyway.addActionListener(e -> beginLoad(null, this::fitColumnWidthsToHeader, this::defaultLoadError));
+        JPanel inner = new JPanel();
+        inner.setLayout(new BoxLayout(inner, BoxLayout.Y_AXIS));
+        inner.add(notLoadedLabel);
+        inner.add(Box.createVerticalStrut(JBUI.scale(8)));
+        inner.add(loadAnyway);
+        // GridBagLayout with a single child centers it.
+        JPanel wrapper = new JPanel(new GridBagLayout());
+        wrapper.add(inner);
+        return wrapper;
+    }
+
+    private void showNotLoadedPlaceholder(long length) {
+        notLoadedLabel.setText(DbfBundle.message("largeFile.placeholder.text",
+                file.getName(), StringUtil.formatFileSize(length)));
+        showCard(CARD_PLACEHOLDER);
+    }
+
+    private void showCard(@NotNull String card) {
+        ((CardLayout) centerCards.getLayout()).show(centerCards, card);
     }
 
     private JComponent buildTopPanel() {
@@ -215,7 +392,7 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
 
             @Override
             public void update(@NotNull AnActionEvent e) {
-                e.getPresentation().setEnabled(!loadError);
+                e.getPresentation().setEnabled(editingReady());
             }
         };
         // Surface the IDE Find shortcut (e.g. Cmd-F) in the button's tooltip. The toolbar's ActionButton
@@ -237,7 +414,7 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
 
             @Override
             public void update(@NotNull AnActionEvent e) {
-                e.getPresentation().setEnabled(modified && !loadError
+                e.getPresentation().setEnabled(editingReady() && modified
                         && !DbfFileWriterService.hasUnwritableColumns(model.getDocument()));
             }
         });
@@ -254,7 +431,7 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
             @Override
             public void update(@NotNull AnActionEvent e) {
                 // A row needs at least one column to hold a value; a freshly created (empty) file has none.
-                e.getPresentation().setEnabled(!loadError && model.getColumnCount() > 0);
+                e.getPresentation().setEnabled(editingReady() && model.getColumnCount() > 0);
             }
         });
         group.add(new TableAction(DbfBundle.message("action.deleteRow.text"), DbfBundle.message("action.deleteRow.description"),
@@ -266,7 +443,7 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
 
             @Override
             public void update(@NotNull AnActionEvent e) {
-                e.getPresentation().setEnabled(!loadError && table.getSelectedRowCount() > 0);
+                e.getPresentation().setEnabled(editingReady() && table.getSelectedRowCount() > 0);
             }
         });
         group.addSeparator(DbfBundle.message("toolbar.group.columns"));
@@ -279,7 +456,7 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
 
             @Override
             public void update(@NotNull AnActionEvent e) {
-                e.getPresentation().setEnabled(!loadError);
+                e.getPresentation().setEnabled(editingReady());
             }
         });
         group.add(new TableAction(DbfBundle.message("action.editColumn.text"), DbfBundle.message("action.editColumn.description"),
@@ -291,7 +468,7 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
 
             @Override
             public void update(@NotNull AnActionEvent e) {
-                e.getPresentation().setEnabled(!loadError && table.getSelectedColumn() >= 0);
+                e.getPresentation().setEnabled(editingReady() && table.getSelectedColumn() >= 0);
             }
         });
         group.add(new TableAction(DbfBundle.message("action.deleteColumn.text"), DbfBundle.message("action.deleteColumn.description"),
@@ -303,7 +480,7 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
 
             @Override
             public void update(@NotNull AnActionEvent e) {
-                e.getPresentation().setEnabled(!loadError && table.getSelectedColumn() >= 0);
+                e.getPresentation().setEnabled(editingReady() && table.getSelectedColumn() >= 0);
             }
         });
         return group;
@@ -554,7 +731,7 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
     // ---- encoding --------------------------------------------------------------------------
 
     private void onEncodingChanged() {
-        if (suppressEncodingEvent) {
+        if (suppressEncodingEvent || loading) {
             return;
         }
         Charset selected = (Charset) encodingCombo.getSelectedItem();
@@ -578,25 +755,29 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
         // widths. The structure is unchanged (only character fields decode differently), so capture the
         // current widths and restore them by field name afterwards.
         Map<String, Integer> widths = currentColumnWidths();
-        if (loadDocument(selected)) {
-            installColumnRenderers();
-            restoreColumnWidths(widths);
-            setModified(false);
-            updateStatus();
-        } else {
-            // Re-read with the new charset failed; the previous document is still loaded and valid, so
-            // clear the error state and put the combo back instead of leaving the editor disabled.
-            loadError = false;
-            suppressEncodingEvent = true;
-            encodingCombo.setSelectedItem(previous);
-            suppressEncodingEvent = false;
-        }
+        beginLoad(selected,
+                () -> {
+                    restoreColumnWidths(widths);
+                    setModified(false);
+                },
+                error -> revertEncoding(previous));
+    }
+
+    /**
+     * Restores the encoding combo to {@code previous} after a failed re-read. The previously loaded
+     * document is still intact (the failed read never replaced the model), so the editor stays usable.
+     */
+    private void revertEncoding(@NotNull Charset previous) {
+        loadError = false;
+        suppressEncodingEvent = true;
+        encodingCombo.setSelectedItem(previous);
+        suppressEncodingEvent = false;
     }
 
     // ---- saving ----------------------------------------------------------------------------
 
     private void save() {
-        if (loadError) {
+        if (loadError || model == null || loading) {
             return;
         }
         // Commit any in-progress cell edit before checking `modified`: the SaveAll shortcut can reach
@@ -626,12 +807,12 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
     private void reloadFromDisk() {
         Charset current = model != null ? model.getDocument().getCharset() : null;
         Map<String, Integer> widths = currentColumnWidths();
-        if (loadDocument(current)) {
-            installColumnRenderers();
-            restoreColumnWidths(widths);
-            setModified(false);
-            updateStatus();
-        }
+        beginLoad(current,
+                () -> {
+                    restoreColumnWidths(widths);
+                    setModified(false);
+                },
+                this::defaultLoadError);
     }
 
     // ---- helpers ---------------------------------------------------------------------------
@@ -682,10 +863,11 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
      * own Find shortcuts so they follow the user's keymap.
      */
     private void registerSearchShortcuts() {
-        // Gate on loadError like the toolbar Find button: after a failed load the table still has
-        // its default (non-Dbf) model, which the search controller cannot work on.
+        // Gate on editingReady() like the toolbar Find button: before the document is loaded (or after a
+        // failed load) the table still has its default (non-Dbf) model, which the search controller
+        // cannot work on.
         bindAction("Find", () -> {
-            if (!loadError) {
+            if (editingReady()) {
                 search.activate();
             }
         });
@@ -722,7 +904,7 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
 
             @Override
             public void update(@NotNull AnActionEvent e) {
-                e.getPresentation().setEnabled(!loadError && !table.isEditing()
+                e.getPresentation().setEnabled(editingReady() && !table.isEditing()
                         && table.getSelectedRowCount() > 0 && table.getSelectedColumnCount() > 0);
             }
 
@@ -745,7 +927,7 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
         connection.subscribe(FileEditorManagerListener.Before.FILE_EDITOR_MANAGER, new FileEditorManagerListener.Before() {
             @Override
             public void beforeFileClosed(@NotNull FileEditorManager source, @NotNull VirtualFile closing) {
-                if (!closing.equals(file) || !modified || loadError) {
+                if (!closing.equals(file) || !modified || loadError || model == null) {
                     return;
                 }
                 if (DbfFileWriterService.hasUnwritableColumns(model.getDocument())) {
@@ -814,6 +996,32 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
 
     @Override
     public void dispose() {
+        disposed = true;
+    }
+
+    /**
+     * Outcome of a background read: on success the raw bytes (for the save baseline) and the parsed
+     * document; on failure the captured {@code error}. Exactly one of {@code document}/{@code error}
+     * is non-null.
+     */
+    private static final class LoadResult {
+        final byte[] bytes;
+        final DbfDocument document;
+        final Throwable error;
+
+        private LoadResult(byte[] bytes, DbfDocument document, Throwable error) {
+            this.bytes = bytes;
+            this.document = document;
+            this.error = error;
+        }
+
+        static LoadResult success(byte[] bytes, DbfDocument document) {
+            return new LoadResult(bytes, document, null);
+        }
+
+        static LoadResult failure(Throwable error) {
+            return new LoadResult(null, null, error);
+        }
     }
 
     /** Common base for toolbar actions; all read Swing state and so update on the EDT. */

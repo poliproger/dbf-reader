@@ -28,6 +28,12 @@ public final class DbfSettings implements PersistentStateComponent<DbfSettings> 
     public boolean createBackupOnSave = false;
 
     /**
+     * Files larger than this many megabytes prompt a confirmation before opening, because the whole
+     * file is read into memory. A value of {@code 0} disables the warning.
+     */
+    public int largeFileWarningThresholdMb = 20;
+
+    /**
      * Fallback charset name used for character fields when a DBF file does not declare one
      * (language-driver byte is 0). A blank value means "use the JVM default charset".
      */
