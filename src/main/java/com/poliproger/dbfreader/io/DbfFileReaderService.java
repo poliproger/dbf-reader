@@ -12,7 +12,6 @@ import org.jetbrains.annotations.Nullable;
 import java.io.ByteArrayInputStream;
 import java.nio.charset.Charset;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 
 /**
@@ -74,7 +73,9 @@ public final class DbfFileReaderService {
             List<DbfRow> rows = new ArrayList<>();
             Object[] record;
             while ((record = reader.nextRecord()) != null) {
-                rows.add(new DbfRow(Arrays.asList(record)));
+                // nextRecord() returns a fresh array each call that nothing else retains, so the row can
+                // take ownership of it directly instead of copying.
+                rows.add(DbfRow.ofRecord(record));
             }
 
             // The first header byte is the format/version flag; javadbf does not expose it.

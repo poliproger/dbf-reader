@@ -78,7 +78,9 @@ out via the writer on save.
   dispose.)
 - **`editor/DbfColumnNavigator`** — the Cmd-F12 "Go to Column" speed-search popup.
 - **`model/`** — `DbfDocument` (columns + rows + charset + header signature byte), `DbfColumnDef`,
-  `DbfRow` (values stored in a `List` so add/remove-column is cheap), `DbfTableModel` (the
+  `DbfRow` (values stored in an `Object[]` to avoid the per-row `ArrayList` overhead on huge files;
+  add/remove-column rebuild the array, and the reader takes ownership of javadbf's record array via
+  `DbfRow.ofRecord` without copying), `DbfTableModel` (the
   `AbstractTableModel`), `DbfTypeConverter` (best-effort value conversion on type/size change;
   clears unconvertible values), and `DbfVersion` (header version byte → display name).
 - **`io/`** — `DbfFileReaderService` (via `DBFReader`) and `DbfFileWriterService` (via `DBFWriter`).
