@@ -24,10 +24,17 @@ public final class DbfTypeConverter {
     public static final class Result {
         public final List<Object> values;
         public final int clearedCount;
+        /**
+         * Number of CHARACTER values that were shortened to fit a smaller field. javadbf truncates
+         * silently on write, so the UI warns about these too (distinct from {@link #clearedCount},
+         * which counts values dropped entirely because they could not be represented at all).
+         */
+        public final int truncatedCount;
 
-        Result(List<Object> values, int clearedCount) {
+        Result(List<Object> values, int clearedCount, int truncatedCount) {
             this.values = values;
             this.clearedCount = clearedCount;
+            this.truncatedCount = truncatedCount;
         }
     }
 
@@ -40,14 +47,34 @@ public final class DbfTypeConverter {
                                           @NotNull Charset charset) {
         List<Object> out = new ArrayList<>(source.size());
         int cleared = 0;
+        int truncated = 0;
         for (Object original : source) {
             Object converted = convertOne(original, oldDef, newDef, charset);
-            if (converted == null && original != null && !isBlank(original)) {
-                cleared++;
+            if (converted == null) {
+                if (original != null && !isBlank(original)) {
+                    cleared++;
+                }
+            } else if (newDef.getType() == DBFDataType.CHARACTER
+                    && isTruncated(original, (String) converted, oldDef, charset)) {
+                truncated++;
             }
             out.add(converted);
         }
-        return new Result(out, cleared);
+        return new Result(out, cleared, truncated);
+    }
+
+    /**
+     * Whether converting {@code original} into the new CHARACTER field dropped trailing bytes — its
+     * displayed form was longer (in {@code charset} bytes) than the {@code converted} string that fits
+     * the smaller field. Lets the caller warn about this otherwise-silent truncation.
+     */
+    private static boolean isTruncated(@Nullable Object original, @NotNull String converted,
+                                       @NotNull DbfColumnDef oldDef, @NotNull Charset charset) {
+        if (original == null) {
+            return false;
+        }
+        String before = DbfValueFormatter.format(original, oldDef);
+        return before.getBytes(charset).length > converted.getBytes(charset).length;
     }
 
     private static @Nullable Object convertOne(@Nullable Object value, DbfColumnDef oldDef,

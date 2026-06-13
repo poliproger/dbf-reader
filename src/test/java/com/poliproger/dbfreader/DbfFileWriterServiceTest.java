@@ -10,6 +10,8 @@ import org.junit.Test;
 
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -18,6 +20,7 @@ import java.util.Collections;
 import java.util.Date;
 import java.util.List;
 
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
@@ -48,6 +51,61 @@ public class DbfFileWriterServiceTest {
         c.clear();
         c.set(year, month - 1, day);
         return c.getTime();
+    }
+
+    /** Serializes {@code doc} through the streaming {@code write(document, File)} path and returns the bytes. */
+    private static byte[] writeToFileBytes(DbfDocument doc) throws Exception {
+        Path temp = Files.createTempFile("dbf-test", ".dbf");
+        try {
+            DbfFileWriterService.write(doc, temp.toFile());
+            return Files.readAllBytes(temp);
+        } finally {
+            Files.deleteIfExists(temp);
+        }
+    }
+
+    // ---- streaming write parity --------------------------------------------------------------
+
+    @Test
+    public void streamingWriteMatchesInMemoryWrite() throws Exception {
+        DbfDocument doc = document(Arrays.asList(
+                new DbfColumnDef("NAME", DBFDataType.CHARACTER, 10, 0),
+                new DbfColumnDef("AMOUNT", DBFDataType.NUMERIC, 8, 2),
+                new DbfColumnDef("RATE", DBFDataType.FLOATING_POINT, 10, 3),
+                new DbfColumnDef("ACTIVE", DBFDataType.LOGICAL, 1, 0),
+                new DbfColumnDef("HIRED", DBFDataType.DATE, 8, 0)), Arrays.asList(
+                new DbfRow(Arrays.asList("abc", new BigDecimal("12.34"), new BigDecimal("1.500"),
+                        Boolean.TRUE, date(2024, 1, 15))),
+                new DbfRow(Arrays.asList((Object) null, null, null, Boolean.FALSE, null)),
+                new DbfRow(Arrays.asList("xyz", new BigDecimal("0.00"), new BigDecimal("9.999"),
+                        Boolean.TRUE, date(1999, 12, 31)))));
+
+        // The File-backed (streaming) writer must produce byte-identical output to the in-memory one,
+        // so the editor's low-heap save path round-trips exactly like the proven byte[] path.
+        assertArrayEquals(DbfFileWriterService.write(doc), writeToFileBytes(doc));
+    }
+
+    @Test
+    public void streamingWriteOfEmptyDocumentProducesEmptyFile() throws Exception {
+        DbfDocument doc = document(Collections.emptyList(), Collections.emptyList());
+
+        byte[] streamed = writeToFileBytes(doc);
+
+        assertEquals(0, streamed.length); // mirrors write(document) returning byte[0]
+        assertArrayEquals(DbfFileWriterService.write(doc), streamed);
+    }
+
+    @Test
+    public void streamingWriteTruncatesAReusedTarget() throws Exception {
+        DbfDocument doc = document(Collections.emptyList(), Collections.emptyList());
+        Path temp = Files.createTempFile("dbf-test", ".dbf");
+        try {
+            Files.write(temp, new byte[]{1, 2, 3, 4, 5}); // stale content from a hypothetical reuse
+            DbfFileWriterService.write(doc, temp.toFile());
+            assertEquals(0, Files.size(temp)); // an empty document leaves no stale bytes behind
+        } finally {
+            Files.deleteIfExists(temp);
+        }
     }
 
     // ---- hasUnwritableColumns ----------------------------------------------------------------

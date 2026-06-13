@@ -74,8 +74,11 @@ import java.awt.GridBagLayout;
 import java.awt.datatransfer.StringSelection;
 import java.beans.PropertyChangeListener;
 import java.beans.PropertyChangeSupport;
+import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.Charset;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -139,6 +142,13 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
     private String busyStatusKey;
     private volatile boolean disposed;
     private boolean suppressEncodingEvent;
+    /**
+     * Generation of the current async save, bumped per {@link #beginSave} and again when the editor
+     * closes ({@code beforeFileClosed}). The off-EDT save continuations capture it and bail once it
+     * moves on, so a close-time {@link #saveBlocking} (or a "Don't Save" choice) supersedes an in-flight
+     * async save instead of letting a second write race it. EDT-only.
+     */
+    private int saveGeneration;
 
     public DbfFileEditor(@NotNull Project project, @NotNull VirtualFile file) {
         this.project = project;
@@ -607,6 +617,10 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
 
     private void addRow() {
         stopEditing();
+        // A live row filter hides the new (empty, non-matching) row, so the click would have no visible
+        // effect and the row could not be edited; drop the filter first so the added row is shown and
+        // selected below. No-op when no filter is active.
+        search.disableFilter();
         model.addRow();
         int last = table.convertRowIndexToView(model.getRowCount() - 1);
         if (last >= 0) {
@@ -710,9 +724,18 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
         restoreColumnWidths(widths);
         endBusy();
 
-        if (result.clearedCount > 0) {
-            Messages.showWarningDialog(project,
-                    DbfBundle.message("convert.warning.message"),
+        if (result.clearedCount > 0 || result.truncatedCount > 0) {
+            StringBuilder message = new StringBuilder();
+            if (result.clearedCount > 0) {
+                message.append(DbfBundle.message("convert.warning.cleared", result.clearedCount));
+            }
+            if (result.truncatedCount > 0) {
+                if (message.length() > 0) {
+                    message.append('\n');
+                }
+                message.append(DbfBundle.message("convert.warning.truncated", result.truncatedCount));
+            }
+            Messages.showWarningDialog(project, message.toString(),
                     DbfBundle.message("convert.warning.title"));
         }
     }
@@ -847,17 +870,25 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
 
     /**
      * Saves off the EDT, mirroring {@link #beginLoad}: the disk re-read/hash ({@link
-     * DbfSaveManager#isModifiedOnDisk}) and the document serialization run on a pooled thread, leaving
-     * only the user dialogs and the write command on the EDT. While the save is in flight the table is
-     * disabled and every action is gated (see {@link #editingReady}), so the document cannot be mutated
-     * under the background serialization — no snapshot is needed.
+     * DbfSaveManager#isModifiedOnDisk}) and the document serialization (streamed to a temp file) run on a
+     * pooled thread, leaving only the user dialogs and the write command on the EDT. Toolbar actions are
+     * gated the instant {@code busy} flips (see {@link #editingReady}); the one remaining mutation path — a
+     * cell edit — is blocked by disabling the table synchronously in {@link #afterDiskCheck} just before
+     * the off-EDT serialization reads the document, so it cannot change under the writer (no per-cell
+     * snapshot, which for a large file would itself freeze the EDT). A full document snapshot is therefore
+     * not needed.
      */
     private void beginSave(@NotNull DbfDocument document) {
         beginBusy("editor.status.saving");
+        // Tag this save: a close-time saveBlocking (or "Don't Save") bumps saveGeneration, and the
+        // continuations below bail when it moves on — so they never commit a second time after the
+        // synchronous close save has already written the file (or after the user declined to save).
+        int generation = ++saveGeneration;
         AppExecutorUtil.getAppExecutorService().execute(() -> {
             boolean changedOnDisk = saveManager.isModifiedOnDisk();
             ApplicationManager.getApplication().invokeLater(
-                    () -> afterDiskCheck(document, changedOnDisk), ModalityState.nonModal(), o -> disposed);
+                    () -> afterDiskCheck(document, changedOnDisk, generation),
+                    ModalityState.nonModal(), o -> disposed || generation != saveGeneration);
         });
     }
 
@@ -865,7 +896,7 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
      * Resolves an external change (if any) and the deleted-records prompt on the EDT, then serializes
      * the document off the EDT before committing it.
      */
-    private void afterDiskCheck(@NotNull DbfDocument document, boolean changedOnDisk) {
+    private void afterDiskCheck(@NotNull DbfDocument document, boolean changedOnDisk, int generation) {
         if (disposed) {
             return;
         }
@@ -887,36 +918,68 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
             endBusy();
             return;
         }
+        // The serialization below reads the live document off the EDT. The busy alarm that disables the
+        // table is deferred (anti-flicker) and may not have fired yet after a fast disk check / the
+        // dialogs above, so freeze the model synchronously now: cancel any cell edit opened in that
+        // window (its value was never committed, so the cell keeps its saved value) and disable the
+        // table, so no edit can commit into a DbfRow while the writer iterates it.
+        cancelEditing();
+        setBusyUi(true);
         AppExecutorUtil.getAppExecutorService().execute(() -> {
-            byte[] bytes;
+            Path serialized = null;
             try {
-                bytes = DbfFileWriterService.write(document);
+                serialized = Files.createTempFile("dbf-save", ".dbf");
+                DbfFileWriterService.write(document, serialized.toFile());
             } catch (Throwable t) {
+                deleteTempQuietly(serialized);
                 ApplicationManager.getApplication().invokeLater(
-                        () -> failSave(t), ModalityState.nonModal(), o -> disposed);
+                        () -> failSave(t), ModalityState.nonModal(), o -> disposed || generation != saveGeneration);
                 return;
             }
+            Path written = serialized;
             ApplicationManager.getApplication().invokeLater(
-                    () -> finishSave(document, bytes), ModalityState.nonModal(), o -> disposed);
+                    () -> finishSave(document, written),
+                    ModalityState.nonModal(), o -> disposed || generation != saveGeneration);
         });
     }
 
-    /** Runs the write command on the EDT, then clears the modified flag and unblocks the UI. */
-    private void finishSave(@NotNull DbfDocument document, byte @NotNull [] bytes) {
-        if (disposed) {
+    /**
+     * Runs the write command on the EDT (streaming the serialized temp file into the VFS), then clears
+     * the modified flag and unblocks the UI. Always deletes the temp file, even when superseded/disposed
+     * reaches it (the only leak is a continuation dropped by the {@code invokeLater} expiry — an editor
+     * closed in the brief serialize→EDT window — where the OS reclaims the system-temp file).
+     */
+    private void finishSave(@NotNull DbfDocument document, @NotNull Path serialized) {
+        try {
+            if (disposed) {
+                return;
+            }
+            try {
+                saveManager.commit(serialized);
+            } catch (RuntimeException ex) {
+                failSave(ex.getCause() != null ? ex.getCause() : ex);
+                return;
+            }
+            // The rewritten file no longer contains the deleted-marked records, so stop warning about
+            // them (cleared before the modified flag flips, so the status bar refreshes without them).
+            document.setDeletedRecordCount(0);
+            endBusy();
+            setModified(false);
+        } finally {
+            deleteTempQuietly(serialized);
+        }
+    }
+
+    /** Deletes a save temp file, ignoring failures (it is transient scratch in the system temp dir). */
+    private static void deleteTempQuietly(@Nullable Path temp) {
+        if (temp == null) {
             return;
         }
         try {
-            saveManager.commit(bytes);
-        } catch (RuntimeException ex) {
-            failSave(ex.getCause() != null ? ex.getCause() : ex);
-            return;
+            Files.deleteIfExists(temp);
+        } catch (IOException ignored) {
+            // Best-effort: a leftover temp file in the system temp dir is reclaimed by the OS.
         }
-        // The rewritten file no longer contains the deleted-marked records, so stop warning about them
-        // (cleared before the modified flag flips, so the status bar refreshes without them).
-        document.setDeletedRecordCount(0);
-        endBusy();
-        setModified(false);
     }
 
     private void failSave(@NotNull Throwable error) {
@@ -980,21 +1043,19 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
         if (deleted > 0 && !saveManager.confirmDeletedRecords(deleted)) {
             return;
         }
-        byte[] bytes;
+        Path serialized = null;
         try {
-            bytes = DbfFileWriterService.write(document);
+            serialized = Files.createTempFile("dbf-save", ".dbf");
+            DbfFileWriterService.write(document, serialized.toFile());
+            saveManager.commit(serialized);
+            document.setDeletedRecordCount(0);
+            setModified(false);
         } catch (Throwable t) {
-            saveManager.showSaveError(t);
-            return;
+            // commit wraps its IOException in a RuntimeException; unwrap it for a clearer message.
+            saveManager.showSaveError(t instanceof RuntimeException && t.getCause() != null ? t.getCause() : t);
+        } finally {
+            deleteTempQuietly(serialized);
         }
-        try {
-            saveManager.commit(bytes);
-        } catch (RuntimeException ex) {
-            saveManager.showSaveError(ex.getCause() != null ? ex.getCause() : ex);
-            return;
-        }
-        document.setDeletedRecordCount(0);
-        setModified(false);
     }
 
     /**
@@ -1144,6 +1205,11 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
                 if (DbfFileWriterService.hasUnwritableColumns(model.getDocument())) {
                     return;
                 }
+                // A background save may be in flight (busy): supersede it so its off-EDT continuations
+                // cannot commit on their own, independent of the choice below. The editor is about to be
+                // disposed, so saveBlocking (on Yes) is the single authoritative write; on No, nothing
+                // must write. Harmless when no save is in flight.
+                saveGeneration++;
                 int answer = Messages.showYesNoDialog(project,
                         DbfBundle.message("save.confirm.message", closing.getName(), closing.getPresentableUrl()),
                         DbfBundle.message("save.confirm.title"), null);

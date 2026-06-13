@@ -43,6 +43,20 @@ public class DbfTypeConverterTest {
 
         assertEquals("1234", result.values.get(0)); // truncated to length 4
         assertEquals(0, result.clearedCount);
+        assertEquals(1, result.truncatedCount); // "1234.56" lost its fractional part on the shrink
+    }
+
+    @Test
+    public void characterShrinkThatFitsIsNotCountedAsTruncated() {
+        DbfColumnDef from = new DbfColumnDef("F", DBFDataType.CHARACTER, 20, 0);
+        DbfColumnDef to = new DbfColumnDef("F", DBFDataType.CHARACTER, 5, 0);
+        List<Object> source = Arrays.asList("ab", "", (Object) null);
+
+        DbfTypeConverter.Result result = DbfTypeConverter.convert(source, from, to, CS);
+
+        assertEquals("ab", result.values.get(0)); // fits the smaller field unchanged
+        assertEquals(0, result.clearedCount);
+        assertEquals(0, result.truncatedCount); // nothing was lost
     }
 
     @Test
@@ -85,5 +99,6 @@ public class DbfTypeConverterTest {
         String converted = (String) result.values.get(0);
         assertEquals("аб", converted); // truncated on a byte boundary, not split mid-character
         assertTrue("must fit the 5-byte field", converted.getBytes(CS).length <= 5);
+        assertEquals(1, result.truncatedCount);
     }
 }

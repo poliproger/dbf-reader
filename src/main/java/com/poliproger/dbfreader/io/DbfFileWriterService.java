@@ -10,6 +10,9 @@ import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
 import java.math.BigDecimal;
 import java.util.Date;
 
@@ -40,7 +43,36 @@ public final class DbfFileWriterService {
             return new byte[0];
         }
         ByteArrayOutputStream bos = new ByteArrayOutputStream();
-        DBFWriter writer = new DBFWriter(bos, document.getCharset());
+        // An OutputStream-backed DBFWriter buffers every record in memory and flushes them on close():
+        // fine for the tests, but for the editor's save path see write(document, File), which streams.
+        serialize(document, new DBFWriter(bos, document.getCharset()));
+        return bos.toByteArray();
+    }
+
+    /**
+     * Streaming variant of {@link #write(DbfDocument)} that serializes straight into {@code target}
+     * instead of returning the bytes. javadbf's {@link File}-backed {@link DBFWriter} appends each
+     * record to disk via a {@code RandomAccessFile} as it is added and backfills the header (record
+     * count) on close, so the whole serialized file never sits in the heap — unlike the in-memory
+     * {@code ByteArrayOutputStream} of the byte-array overload (plus its {@code toByteArray} copy and
+     * javadbf's own buffered-record list). The editor uses this for large {@code .dbf} files and then
+     * streams {@code target} into the VFS, keeping peak heap close to the in-memory document alone.
+     *
+     * <p>{@code target} must be an existing, empty file: the {@code File} constructor reads an existing
+     * header when the file is non-empty (append mode), and {@code setFields} then rejects the write.
+     */
+    public static void write(@NotNull DbfDocument document, @NotNull File target) throws IOException {
+        if (document.getColumnCount() == 0) {
+            // Empty document -> empty file (mirrors the byte[0] case). A fresh temp file is already
+            // zero-length; truncate defensively so a reused target cannot leave stale bytes.
+            new FileOutputStream(target).close();
+            return;
+        }
+        serialize(document, new DBFWriter(target, document.getCharset()));
+    }
+
+    /** Sets the fields and writes every row through {@code writer}, then closes it. */
+    private static void serialize(@NotNull DbfDocument document, @NotNull DBFWriter writer) {
         try {
             int columnCount = document.getColumnCount();
             DBFField[] fields = new DBFField[columnCount];
@@ -65,10 +97,10 @@ public final class DbfFileWriterService {
                 writer.addRecord(values);
             }
         } finally {
-            // For OutputStream-backed writers, close() flushes the buffered records into bos.
+            // For a File-backed writer close() seeks back and backfills the header (record count) and
+            // the EOF byte; for an OutputStream-backed one it flushes the buffered records into the stream.
             writer.close();
         }
-        return bos.toByteArray();
     }
 
     /**

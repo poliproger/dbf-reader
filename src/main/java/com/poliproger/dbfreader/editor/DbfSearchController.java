@@ -459,12 +459,11 @@ final class DbfSearchController implements CellSearchHighlighter {
 
     /** First match at or after {@code anchor} (row-major), wrapping to the first match. */
     private int indexAtOrAfter(long anchor) {
-        for (int i = 0; i < matches.length; i++) {
-            if (matches[i] >= anchor) {
-                return i;
-            }
-        }
-        return 0;
+        // matches is sorted ascending (row-major), so binary-search the lower bound rather than scan it:
+        // the scan is O(matches) and runs on every refresh — costly when a broad query matches a huge
+        // number of cells. Past the last match, wrap to the first (index 0).
+        int pos = lowerBound(matches, anchor);
+        return pos < matches.length ? pos : 0;
     }
 
     void findNext() {
@@ -542,6 +541,20 @@ final class DbfSearchController implements CellSearchHighlighter {
         if (sorter != null) {
             sorter = null;
             table.setRowSorter(null);
+        }
+    }
+
+    /**
+     * Turns the row filter off and restores the full view. Called by the editor when it adds a row: the
+     * new row is empty and so matches nothing, and a live filter would hide it — leaving the Add Row
+     * click with no visible effect and the row uneditable. Gated on an installed sorter (the bar is open
+     * and filtering), so adding a row while the bar is closed leaves the remembered toggle untouched; the
+     * filter toggle button reflects the change on its next toolbar update.
+     */
+    void disableFilter() {
+        if (sorter != null) {
+            filter = false;
+            detachRowSorter();
         }
     }
 

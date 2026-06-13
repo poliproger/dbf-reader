@@ -4,6 +4,21 @@
 
 ## Unreleased
 
+### Changed
+
+- Saving a large file now uses much less memory — the new content is streamed out to disk instead
+  of being held in memory in full — and Save no longer re-reads and re-hashes the whole file to
+  check for external changes when its size and modification time are unchanged.
+
+### Fixed
+
+- A cell edit made at the moment a save started could be lost or written inconsistently; the table
+  is now frozen before the file is serialized.
+- Shrinking a text column's size now warns when existing values are too long to fit and would be
+  truncated, matching the warning already shown when a value overflows a numeric field.
+- Adding a row while the search row filter is active now clears the filter so the new row is visible
+  and editable, instead of silently creating a hidden row.
+
 ## 1.2.0 - 2026-06-10
 
 ### Added
