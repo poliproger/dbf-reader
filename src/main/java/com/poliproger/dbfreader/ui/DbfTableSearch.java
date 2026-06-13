@@ -141,6 +141,26 @@ public final class DbfTableSearch {
         return new Result(matches, false);
     }
 
+    /**
+     * Whether a single cell's displayed text matches {@code query} — one iteration of {@link #find},
+     * letting the editor re-evaluate just an edited cell instead of rescanning the whole table.
+     * Returns {@code false} for a blank query or an invalid regex (consistent with {@code find}
+     * producing no matches in those cases).
+     */
+    public static boolean matchesCell(@Nullable Object value, @NotNull DbfColumnDef def, @NotNull Query query) {
+        if (query.text().isEmpty()) {
+            return false;
+        }
+        Pattern pattern;
+        try {
+            pattern = compile(query);
+        } catch (PatternSyntaxException e) {
+            return false;
+        }
+        String text = DbfValueFormatter.format(value, def);
+        return !text.isEmpty() && pattern.matcher(text).find();
+    }
+
     private static @NotNull Pattern compile(@NotNull Query query) {
         String base = query.regex() ? query.text() : Pattern.quote(query.text());
         if (query.wholeWords()) {

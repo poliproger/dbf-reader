@@ -168,6 +168,24 @@ public class DbfTableSearchTest {
         assertArrayEquals(DbfTableSearch.find(doc, query).matches(), snap.matches());
     }
 
+    @Test
+    public void matchesCellMirrorsFind() throws Exception {
+        DbfDocument doc = document();
+        DbfColumnDef name = doc.getColumn(0);   // CHARACTER
+        DbfColumnDef price = doc.getColumn(2);  // NUMERIC (8,2)
+        assertTrue(DbfTableSearch.matchesCell("Alice", name, new DbfTableSearch.Query("alice", false, false, false)));
+        assertFalse("match-case respected",
+                DbfTableSearch.matchesCell("Alice", name, new DbfTableSearch.Query("alice", true, false, false)));
+        assertTrue("matches the displayed two-decimal form",
+                DbfTableSearch.matchesCell(bd("19.99"), price, new DbfTableSearch.Query("19.99", false, false, false)));
+        assertFalse("null cell never matches",
+                DbfTableSearch.matchesCell(null, name, new DbfTableSearch.Query("a", false, false, false)));
+        assertFalse("blank query matches nothing",
+                DbfTableSearch.matchesCell("Alice", name, new DbfTableSearch.Query("", false, false, false)));
+        assertFalse("invalid regex matches nothing",
+                DbfTableSearch.matchesCell("Alice", name, new DbfTableSearch.Query("[", false, true, false)));
+    }
+
     private static DbfRow[] snapshotRows(DbfDocument doc) {
         return doc.getRows().toArray(new DbfRow[0]);
     }

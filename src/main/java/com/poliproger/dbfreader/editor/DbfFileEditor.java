@@ -273,8 +273,8 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
             // the record count must track every row add/delete, not just the first edit.
             updateStatus();
         });
-        model.addTableModelListener(e -> search.onModelChanged());
-        search.onModelChanged();
+        model.addTableModelListener(e -> search.onModelChanged(e));
+        search.onModelChanged(null);
         populateEncodingCombo(document.getCharset());
         loadError = false;
         installColumnRenderers();
@@ -648,7 +648,7 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
             model.addRow();
         }
         installColumnRenderers();
-        search.onModelChanged();
+        search.onModelChanged(null);
         restoreColumnWidths(widths);
         fitColumnWidthToHeader(table.getColumnModel().getColumnCount() - 1);
     }
@@ -706,7 +706,7 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
         cancelEditing();
         model.updateColumn(modelColumn, newDef, result.values);
         installColumnRenderers();
-        search.onModelChanged();
+        search.onModelChanged(null);
         restoreColumnWidths(widths);
         endBusy();
 
@@ -732,7 +732,7 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
             model.clearRows();
         }
         installColumnRenderers();
-        search.onModelChanged();
+        search.onModelChanged(null);
         restoreColumnWidths(widths);
     }
 

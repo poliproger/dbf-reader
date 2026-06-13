@@ -66,9 +66,11 @@ out via the writer on save.
   sorting disabled). The sorter must be detached before swapping table models (`detachRowSorter`).
   The match pass itself runs **off the EDT**: the controller snapshots the rows/column defs on the
   EDT and scans on a pooled thread, dropping a pass superseded by a newer query / model change / close
-  via a `searchSeq` generation counter. The pure matching logic lives in `ui/DbfTableSearch`
-  (Swing-free, tested); its background overload polls a cancellation check and returns `null` when
-  superseded.
+  via a `searchSeq` generation counter. A single committed cell edit is folded into the match set in
+  place (`updateCellMatch`, via `DbfTableSearch.matchesCell`) instead of rescanning the whole table —
+  unless a scan is still in flight (`searchSeq != appliedSeq`), when it falls back to a rescan. The
+  pure matching logic lives in `ui/DbfTableSearch` (Swing-free, tested); its background overload polls
+  a cancellation check and returns `null` when superseded.
 - **`editor/DbfSaveManager`** — the write-back side of the editor: the optional one-time `.bak`
   backup, the external-change conflict check and the final `WriteCommandAction` + `setBinaryContent`.
   Exposes the save steps individually — a background-safe `isModifiedOnDisk()`, the EDT dialogs

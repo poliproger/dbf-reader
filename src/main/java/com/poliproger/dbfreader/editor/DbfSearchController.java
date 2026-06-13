@@ -32,12 +32,14 @@ import com.poliproger.dbfreader.ui.DbfTableSearch;
 import com.poliproger.dbfreader.ui.FilterOnlyRowSorter;
 import com.poliproger.dbfreader.ui.cell.CellSearchHighlighter;
 import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
 
 import javax.swing.Icon;
 import javax.swing.JComponent;
 import javax.swing.JPanel;
 import javax.swing.RowFilter;
 import javax.swing.event.DocumentEvent;
+import javax.swing.event.TableModelEvent;
 import javax.swing.table.TableRowSorter;
 import java.awt.BorderLayout;
 import java.awt.Color;
@@ -92,6 +94,12 @@ final class DbfSearchController implements CellSearchHighlighter {
      * it. {@code volatile}: written on the EDT, read on the scan thread.
      */
     private volatile long searchSeq;
+    /**
+     * The {@link #searchSeq} of the last result applied to {@link #matches} (EDT-only). When it equals
+     * {@code searchSeq} the match set is final for the current query, so a single-cell edit can patch it
+     * in place; otherwise a scan is still in flight and the edit falls back to a full rescan.
+     */
+    private long appliedSeq;
     /** Set when the parent editor is disposed; gates the background apply step. */
     private volatile boolean disposed;
 
@@ -249,15 +257,37 @@ final class DbfSearchController implements CellSearchHighlighter {
         table.requestFocusInWindow();
     }
 
-    /** The table model changed (edit, row/column op, reload): refresh matches if the bar is open. */
-    void onModelChanged() {
-        if (bar.isVisible()) {
-            // Invalidate any in-flight scan at once: it ran on a now-stale snapshot, so its result must
-            // not land. The debounce below restarts the scan against the changed model. Refreshes the
-            // highlights/counter without yanking the selection away from what the user edits.
-            searchSeq++;
-            scheduleRecompute(false);
+    /**
+     * The table model changed: refresh matches if the bar is open. {@code e} is the originating event
+     * (or {@code null} for a structural change the editor drives directly). A single committed cell
+     * edit only changes that one cell's match state, so it is updated in place; anything else rescans.
+     */
+    void onModelChanged(@Nullable TableModelEvent e) {
+        if (!bar.isVisible()) {
+            return;
         }
+        if (isSingleCellUpdate(e)) {
+            // Update just the edited cell instead of rescanning the whole table — even off the EDT, a
+            // large-file scan is wasteful for a one-cell change. (Doesn't touch searchSeq: there is no
+            // background pass to invalidate, and an in-flight one stays valid — its snapshot shares this
+            // row, whose value the scan reads live.)
+            updateCellMatch(e.getFirstRow(), e.getColumn());
+            return;
+        }
+        // Invalidate any in-flight scan at once: it ran on a now-stale snapshot, so its result must
+        // not land. The debounce below restarts the scan against the changed model. Refreshes the
+        // highlights/counter without yanking the selection away from what the user edits.
+        searchSeq++;
+        scheduleRecompute(false);
+    }
+
+    /** Whether {@code e} is a single committed cell edit ({@code fireTableCellUpdated}). */
+    private static boolean isSingleCellUpdate(@Nullable TableModelEvent e) {
+        return e != null
+                && e.getType() == TableModelEvent.UPDATE
+                && e.getColumn() != TableModelEvent.ALL_COLUMNS
+                && e.getFirstRow() >= 0  // not HEADER_ROW (-1)
+                && e.getFirstRow() == e.getLastRow();
     }
 
     // ---- search ----------------------------------------------------------------------------
@@ -286,13 +316,12 @@ final class DbfSearchController implements CellSearchHighlighter {
         long seq = ++searchSeq;
         DbfTableModel model = (DbfTableModel) table.getModel();
         DbfDocument doc = model.getDocument();
-        DbfTableSearch.Query query = new DbfTableSearch.Query(
-                searchField.getText(), matchCase, regex, wholeWords);
+        DbfTableSearch.Query query = currentQuery();
 
         // A blank query matches nothing and is cheap to apply; skip the background hop so clearing the
         // field updates instantly.
         if (query.text().isEmpty()) {
-            applyResult(DbfTableSearch.Result.EMPTY, query, moveSelection);
+            applyResult(DbfTableSearch.Result.EMPTY, query, moveSelection, seq);
             return;
         }
 
@@ -309,29 +338,40 @@ final class DbfSearchController implements CellSearchHighlighter {
             ApplicationManager.getApplication().invokeLater(
                     () -> {
                         if (!disposed && bar.isVisible() && searchSeq == seq) {
-                            applyResult(result, query, moveSelection);
+                            applyResult(result, query, moveSelection, seq);
                         }
                     },
                     ModalityState.any(), o -> disposed);
         });
     }
 
+    private DbfTableSearch.Query currentQuery() {
+        return new DbfTableSearch.Query(searchField.getText(), matchCase, regex, wholeWords);
+    }
+
     /** Applies a completed match pass on the EDT: refreshes the matches, filter, counter and selection. */
     private void applyResult(@NotNull DbfTableSearch.Result result, @NotNull DbfTableSearch.Query query,
-                             boolean moveSelection) {
+                             boolean moveSelection, long seq) {
+        appliedSeq = seq;
         matches = result.matches();
         matchRows.clear();
         for (long cell : matches) {
             matchRows.set(DbfTableSearch.rowOf(cell));
         }
         applyFilter();
+        refreshMatchState(query.text().isEmpty(), result.badPattern(), moveSelection);
+    }
 
+    /**
+     * Refreshes the counter, current-match index, field-error shade and repaint from the current
+     * {@link #matches}. Shared by the full-scan apply and the incremental single-cell update.
+     */
+    private void refreshMatchState(boolean blankQuery, boolean badPattern, boolean moveSelection) {
         if (matches.length == 0) {
             currentIndex = -1;
-            boolean blank = query.text().isEmpty();
-            setFieldError(!blank);
-            countLabel.setText(blank ? "" : DbfBundle.message(
-                    result.badPattern() ? "editor.search.badRegex" : "editor.search.noMatches"));
+            setFieldError(!blankQuery);
+            countLabel.setText(blankQuery ? "" : DbfBundle.message(
+                    badPattern ? "editor.search.badRegex" : "editor.search.noMatches"));
         } else {
             setFieldError(false);
             currentIndex = indexAtOrAfter(lastCurrentCell);
@@ -342,6 +382,79 @@ final class DbfSearchController implements CellSearchHighlighter {
             }
         }
         table.repaint();
+    }
+
+    /**
+     * Updates the match set for a single edited cell without rescanning the table. Falls back to a full
+     * rescan if a scan is still in flight (the match set isn't final, so patching it would corrupt it).
+     */
+    private void updateCellMatch(int modelRow, int modelColumn) {
+        if (searchSeq != appliedSeq) {
+            searchSeq++;
+            scheduleRecompute(false);
+            return;
+        }
+        DbfTableSearch.Query query = currentQuery();
+        if (query.text().isEmpty()) {
+            return;  // nothing is highlighted; the edited cell repaints itself from the table event
+        }
+        DbfDocument doc = ((DbfTableModel) table.getModel()).getDocument();
+        if (modelRow < 0 || modelRow >= doc.getRowCount() || modelColumn < 0 || modelColumn >= doc.getColumnCount()) {
+            return;
+        }
+        boolean nowMatch = DbfTableSearch.matchesCell(
+                doc.getRows().get(modelRow).get(modelColumn), doc.getColumn(modelColumn), query);
+        long cell = DbfTableSearch.encode(modelRow, modelColumn);
+        int idx = Arrays.binarySearch(matches, cell);
+        boolean wasMatch = idx >= 0;
+        if (nowMatch == wasMatch) {
+            return;  // match set unchanged; the cell already repaints itself from the table event
+        }
+        boolean rowVisibilityChanged;
+        if (nowMatch) {
+            matches = insertAt(matches, -idx - 1, cell);
+            rowVisibilityChanged = !matchRows.get(modelRow);
+            matchRows.set(modelRow);
+        } else {
+            matches = removeAt(matches, idx);
+            rowVisibilityChanged = !rowHasMatch(modelRow);
+            if (rowVisibilityChanged) {
+                matchRows.clear(modelRow);
+            }
+        }
+        // Re-apply the filter only when this row just gained/lost its sole match (so it must appear or
+        // hide); otherwise its visibility is unchanged and the O(rows) filter pass is unnecessary.
+        if (filter && rowVisibilityChanged) {
+            applyFilter();
+        }
+        refreshMatchState(false, false, false);
+    }
+
+    /** Whether {@link #matches} still has any cell in {@code modelRow} (matches are sorted row-major). */
+    private boolean rowHasMatch(int modelRow) {
+        int pos = lowerBound(matches, DbfTableSearch.encode(modelRow, 0));
+        return pos < matches.length && DbfTableSearch.rowOf(matches[pos]) == modelRow;
+    }
+
+    /** Index of the first element {@code >= key} in the sorted array {@code arr}. */
+    private static int lowerBound(long @NotNull [] arr, long key) {
+        int idx = Arrays.binarySearch(arr, key);
+        return idx >= 0 ? idx : -idx - 1;
+    }
+
+    private static long @NotNull [] insertAt(long @NotNull [] arr, int pos, long value) {
+        long[] next = new long[arr.length + 1];
+        System.arraycopy(arr, 0, next, 0, pos);
+        next[pos] = value;
+        System.arraycopy(arr, pos, next, pos + 1, arr.length - pos);
+        return next;
+    }
+
+    private static long @NotNull [] removeAt(long @NotNull [] arr, int pos) {
+        long[] next = new long[arr.length - 1];
+        System.arraycopy(arr, 0, next, 0, pos);
+        System.arraycopy(arr, pos + 1, next, pos, arr.length - pos - 1);
+        return next;
     }
 
     /** First match at or after {@code anchor} (row-major), wrapping to the first match. */
