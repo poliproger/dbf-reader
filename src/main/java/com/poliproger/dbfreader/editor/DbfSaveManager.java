@@ -1,6 +1,7 @@
 package com.poliproger.dbfreader.editor;
 
 import com.intellij.openapi.command.WriteCommandAction;
+import com.intellij.openapi.diagnostic.Logger;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.ui.Messages;
 import com.intellij.openapi.vfs.VirtualFile;
@@ -26,6 +27,8 @@ import java.util.Arrays;
  * {@link #commit(byte[]) write command} (which must run on the EDT) there.
  */
 final class DbfSaveManager {
+
+    private static final Logger LOG = Logger.getInstance(DbfSaveManager.class);
 
     /** The user's answer to the external-change conflict prompt ({@link #askConflict()}). */
     enum ConflictChoice {
@@ -167,6 +170,10 @@ final class DbfSaveManager {
     }
 
     void showSaveError(@NotNull Throwable ex) {
+        // Log the full stack so a save failure is diagnosable from idea.log; the dialog shows only the
+        // message. warn (not error) keeps it out of the "IDE internal error" UI for routine failures
+        // (e.g. a read-only file).
+        LOG.warn("Failed to save DBF file " + file.getName(), ex);
         Messages.showErrorDialog(project,
                 ex.getMessage() == null ? ex.toString() : ex.getMessage(),
                 DbfBundle.message("save.error.title"));
