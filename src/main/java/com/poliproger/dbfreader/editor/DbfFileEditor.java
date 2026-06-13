@@ -29,6 +29,7 @@ import com.intellij.ui.components.JBLabel;
 import com.intellij.ui.components.JBLoadingPanel;
 import com.intellij.ui.components.JBScrollPane;
 import com.intellij.ui.table.JBTable;
+import com.intellij.util.Alarm;
 import com.intellij.util.concurrency.AppExecutorUtil;
 import com.intellij.util.messages.MessageBusConnection;
 import com.intellij.util.ui.JBUI;
@@ -119,6 +120,8 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
     private final DbfSearchController search = new DbfSearchController(table, this);
     private final DbfColumnNavigator columnNavigator = new DbfColumnNavigator(table);
     private final DbfSaveManager saveManager;
+    /** Defers disabling the table during a save so a fast (small-file) save doesn't flash it disabled. */
+    private final Alarm savingUiAlarm = new Alarm(Alarm.ThreadToUse.SWING_THREAD, this);
 
     private JBLoadingPanel loadingPanel;
     private JBLabel notLoadedLabel;
@@ -127,6 +130,7 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
     private boolean modified;
     private boolean loadError;
     private boolean loading;
+    private boolean saving;
     private volatile boolean disposed;
     private boolean suppressEncodingEvent;
 
@@ -298,7 +302,7 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
 
     /** Whether the document is loaded and editable — gates the toolbar actions and shortcuts. */
     private boolean editingReady() {
-        return model != null && !loadError && !loading;
+        return model != null && !loadError && !loading && !saving;
     }
 
     // ---- UI --------------------------------------------------------------------------------
@@ -748,7 +752,7 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
     // ---- encoding --------------------------------------------------------------------------
 
     private void onEncodingChanged() {
-        if (suppressEncodingEvent || loading) {
+        if (suppressEncodingEvent || loading || saving) {
             return;
         }
         Charset selected = (Charset) encodingCombo.getSelectedItem();
@@ -794,7 +798,7 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
     // ---- saving ----------------------------------------------------------------------------
 
     private void save() {
-        if (loadError || model == null || loading) {
+        if (!editingReady()) {
             return;
         }
         // Commit any in-progress cell edit before checking `modified`: the SaveAll shortcut can reach
@@ -808,12 +812,150 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
         if (DbfFileWriterService.hasUnwritableColumns(model.getDocument())) {
             return;
         }
-        DbfSaveManager.SaveResult result = saveManager.save(model.getDocument());
-        if (result == DbfSaveManager.SaveResult.SAVED) {
-            setModified(false);
-        } else if (result == DbfSaveManager.SaveResult.RELOAD_REQUESTED) {
-            reloadFromDisk();
+        beginSave(model.getDocument());
+    }
+
+    /**
+     * Saves off the EDT, mirroring {@link #beginLoad}: the disk re-read/hash ({@link
+     * DbfSaveManager#isModifiedOnDisk}) and the document serialization run on a pooled thread, leaving
+     * only the user dialogs and the write command on the EDT. While the save is in flight the table is
+     * disabled and every action is gated (see {@link #editingReady}), so the document cannot be mutated
+     * under the background serialization — no snapshot is needed.
+     */
+    private void beginSave(@NotNull DbfDocument document) {
+        saving = true;
+        // Gating (editingReady) already blocks the toolbar/shortcuts — and so every structural change —
+        // the instant `saving` flips. Disabling the table (which also blocks a cell edit, the one
+        // mutation not gated that way) is deferred: a fast save finishes before the delay and never
+        // flashes the table disabled, while a slow one takes the lock before the serialization runs.
+        savingUiAlarm.cancelAllRequests();
+        savingUiAlarm.addRequest(() -> {
+            if (saving) {
+                setSavingUi(true);
+            }
+        }, LOADING_START_DELAY_MS);
+        AppExecutorUtil.getAppExecutorService().execute(() -> {
+            boolean changedOnDisk = saveManager.isModifiedOnDisk();
+            ApplicationManager.getApplication().invokeLater(
+                    () -> afterDiskCheck(document, changedOnDisk), ModalityState.nonModal(), o -> disposed);
+        });
+    }
+
+    /**
+     * Resolves an external change (if any) and the deleted-records prompt on the EDT, then serializes
+     * the document off the EDT before committing it.
+     */
+    private void afterDiskCheck(@NotNull DbfDocument document, boolean changedOnDisk) {
+        if (disposed) {
+            return;
         }
+        if (changedOnDisk) {
+            DbfSaveManager.ConflictChoice choice = saveManager.askConflict();
+            if (choice == DbfSaveManager.ConflictChoice.RELOAD) {
+                endSave();
+                reloadFromDisk();
+                return;
+            }
+            if (choice == DbfSaveManager.ConflictChoice.CANCEL) {
+                endSave();
+                return;
+            }
+            // OVERWRITE: fall through and write our version.
+        }
+        int deleted = document.getDeletedRecordCount();
+        if (deleted > 0 && !saveManager.confirmDeletedRecords(deleted)) {
+            endSave();
+            return;
+        }
+        AppExecutorUtil.getAppExecutorService().execute(() -> {
+            byte[] bytes;
+            try {
+                bytes = DbfFileWriterService.write(document);
+            } catch (Throwable t) {
+                ApplicationManager.getApplication().invokeLater(
+                        () -> failSave(t), ModalityState.nonModal(), o -> disposed);
+                return;
+            }
+            ApplicationManager.getApplication().invokeLater(
+                    () -> finishSave(document, bytes), ModalityState.nonModal(), o -> disposed);
+        });
+    }
+
+    /** Runs the write command on the EDT, then clears the modified flag and unblocks the UI. */
+    private void finishSave(@NotNull DbfDocument document, byte @NotNull [] bytes) {
+        if (disposed) {
+            return;
+        }
+        try {
+            saveManager.commit(bytes);
+        } catch (RuntimeException ex) {
+            failSave(ex.getCause() != null ? ex.getCause() : ex);
+            return;
+        }
+        // The rewritten file no longer contains the deleted-marked records, so stop warning about them
+        // (cleared before the modified flag flips, so the status bar refreshes without them).
+        document.setDeletedRecordCount(0);
+        endSave();
+        setModified(false);
+    }
+
+    private void failSave(@NotNull Throwable error) {
+        if (disposed) {
+            return;
+        }
+        saveManager.showSaveError(error);
+        endSave();
+    }
+
+    private void endSave() {
+        saving = false;
+        savingUiAlarm.cancelAllRequests();
+        setSavingUi(false);
+    }
+
+    /**
+     * Blocks or unblocks editing while a save is in flight: disabling the table stops a cell edit from
+     * mutating the document under the background serialization (the toolbar actions are already gated by
+     * {@link #editingReady}), and the status bar shows the in-progress state.
+     */
+    private void setSavingUi(boolean active) {
+        table.setEnabled(!active);
+        encodingCombo.setEnabled(!active);
+        updateStatus();
+    }
+
+    /**
+     * Synchronous save for the "save before closing?" path: the editor is about to be disposed, so the
+     * async {@link #beginSave} pipeline (whose continuations expire on dispose) would never finish the
+     * write. Runs every step on the EDT instead, so the file is written before the editor closes. A
+     * conflicting on-disk change is resolved as "skip the write" (reloading a closing file is
+     * pointless), letting the close proceed with the on-disk version kept.
+     */
+    private void saveBlocking() {
+        DbfDocument document = model.getDocument();
+        if (saveManager.isModifiedOnDisk()
+                && saveManager.askConflict() != DbfSaveManager.ConflictChoice.OVERWRITE) {
+            return;
+        }
+        int deleted = document.getDeletedRecordCount();
+        if (deleted > 0 && !saveManager.confirmDeletedRecords(deleted)) {
+            return;
+        }
+        byte[] bytes;
+        try {
+            bytes = DbfFileWriterService.write(document);
+        } catch (Throwable t) {
+            saveManager.showSaveError(t);
+            return;
+        }
+        try {
+            saveManager.commit(bytes);
+        } catch (RuntimeException ex) {
+            saveManager.showSaveError(ex.getCause() != null ? ex.getCause() : ex);
+            return;
+        }
+        document.setDeletedRecordCount(0);
+        setModified(false);
     }
 
     /**
@@ -874,6 +1016,9 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
         sb.append("  |  ").append(model.getDocument().getCharset().displayName());
         if (modified) {
             sb.append("  |  ").append(DbfBundle.message("editor.status.modified"));
+        }
+        if (saving) {
+            sb.append("  |  ").append(DbfBundle.message("editor.status.saving"));
         }
         statusLabel.setText(sb.toString());
     }
@@ -951,7 +1096,7 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
         connection.subscribe(FileEditorManagerListener.Before.FILE_EDITOR_MANAGER, new FileEditorManagerListener.Before() {
             @Override
             public void beforeFileClosed(@NotNull FileEditorManager source, @NotNull VirtualFile closing) {
-                // `loading`: while a (re)load is in flight save() is a silent no-op, so a "save?"
+                // `loading`: while a (re)load is in flight a save is a silent no-op, so a "save?"
                 // prompt would promise something it cannot deliver — and the pending edits are
                 // already condemned by the reload anyway.
                 if (!closing.equals(file) || !modified || loadError || model == null || loading) {
@@ -964,7 +1109,9 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
                         DbfBundle.message("save.confirm.message", closing.getName(), closing.getPresentableUrl()),
                         DbfBundle.message("save.confirm.title"), null);
                 if (answer == Messages.YES) {
-                    save();
+                    // The editor is about to be disposed, so the async pipeline (whose continuations
+                    // expire on dispose) would never finish the write — save synchronously instead.
+                    saveBlocking();
                 }
             }
         });
