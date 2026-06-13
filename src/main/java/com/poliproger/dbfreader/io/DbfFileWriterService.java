@@ -33,6 +33,12 @@ public final class DbfFileWriterService {
     }
 
     public static byte @NotNull [] write(@NotNull DbfDocument document) {
+        // javadbf cannot write a document with no fields (DBFWriter.setFields rejects an empty array).
+        // Save it as an empty file instead — the same bytes a freshly created file has, which the
+        // reader already opens as a blank document, so the round-trip stays consistent.
+        if (document.getColumnCount() == 0) {
+            return new byte[0];
+        }
         ByteArrayOutputStream bos = new ByteArrayOutputStream();
         DBFWriter writer = new DBFWriter(bos, document.getCharset());
         try {

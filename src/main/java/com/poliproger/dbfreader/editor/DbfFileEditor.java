@@ -431,10 +431,7 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
 
             @Override
             public void update(@NotNull AnActionEvent e) {
-                // Column count: javadbf cannot write a document with no fields, so after deleting the
-                // last column the document stays unsaveable until a column is added back.
                 e.getPresentation().setEnabled(editingReady() && modified
-                        && model.getColumnCount() > 0
                         && !DbfFileWriterService.hasUnwritableColumns(model.getDocument()));
             }
         });
@@ -808,10 +805,7 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
         if (!modified) {
             return;
         }
-        // javadbf cannot write a document with no fields (DBFWriter.setFields rejects an empty array),
-        // so a fully emptied document is unsaveable — same silent no-op as unwritable columns.
-        if (model.getColumnCount() == 0
-                || DbfFileWriterService.hasUnwritableColumns(model.getDocument())) {
+        if (DbfFileWriterService.hasUnwritableColumns(model.getDocument())) {
             return;
         }
         DbfSaveManager.SaveResult result = saveManager.save(model.getDocument());
@@ -963,10 +957,7 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
                 if (!closing.equals(file) || !modified || loadError || model == null || loading) {
                     return;
                 }
-                // No prompt for documents save() would refuse anyway: zero columns (javadbf cannot
-                // write a document with no fields) or unwritable memo/extended columns.
-                if (model.getColumnCount() == 0
-                        || DbfFileWriterService.hasUnwritableColumns(model.getDocument())) {
+                if (DbfFileWriterService.hasUnwritableColumns(model.getDocument())) {
                     return;
                 }
                 int answer = Messages.showYesNoDialog(project,

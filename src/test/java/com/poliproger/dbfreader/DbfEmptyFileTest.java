@@ -39,6 +39,22 @@ public class DbfEmptyFileTest {
         assertEquals("windows-1251", doc.getCharset().name());
     }
 
+    /**
+     * A document emptied of all columns (or never given any) saves as an empty file — javadbf cannot
+     * write zero fields — and that file loads back as the same blank document.
+     */
+    @Test
+    public void blankDocumentWritesAsEmptyFile() {
+        DbfDocument doc = DbfFileReaderService.read(new byte[0], null, StandardCharsets.UTF_8);
+
+        byte[] written = DbfFileWriterService.write(doc);
+        assertEquals(0, written.length);
+
+        DbfDocument reloaded = DbfFileReaderService.read(written, null, StandardCharsets.UTF_8);
+        assertEquals(0, reloaded.getColumnCount());
+        assertEquals(0, reloaded.getRowCount());
+    }
+
     /** After adding a writable column, the blank document serializes to a valid, re-readable DBF. */
     @Test
     public void blankDocumentBecomesSaveableAfterAddingColumn() {
