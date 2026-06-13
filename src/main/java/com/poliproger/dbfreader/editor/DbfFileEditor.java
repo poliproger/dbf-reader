@@ -120,8 +120,8 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
     private final DbfSearchController search = new DbfSearchController(table, this);
     private final DbfColumnNavigator columnNavigator = new DbfColumnNavigator(table);
     private final DbfSaveManager saveManager;
-    /** Defers disabling the table during a save so a fast (small-file) save doesn't flash it disabled. */
-    private final Alarm savingUiAlarm = new Alarm(Alarm.ThreadToUse.SWING_THREAD, this);
+    /** Defers disabling the table during a background op so a fast one doesn't flash it disabled. */
+    private final Alarm busyUiAlarm = new Alarm(Alarm.ThreadToUse.SWING_THREAD, this);
 
     private JBLoadingPanel loadingPanel;
     private JBLabel notLoadedLabel;
@@ -130,7 +130,13 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
     private boolean modified;
     private boolean loadError;
     private boolean loading;
-    private boolean saving;
+    /**
+     * A background editor operation (save or column conversion) is in flight: the model must not be
+     * mutated until it finishes, so every action is gated on {@code !busy} and the table is disabled.
+     */
+    private boolean busy;
+    /** Status-bar key shown while {@link #busy} (e.g. "Saving..."), or {@code null}. */
+    private String busyStatusKey;
     private volatile boolean disposed;
     private boolean suppressEncodingEvent;
 
@@ -302,7 +308,7 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
 
     /** Whether the document is loaded and editable — gates the toolbar actions and shortcuts. */
     private boolean editingReady() {
-        return model != null && !loadError && !loading && !saving;
+        return model != null && !loadError && !loading && !busy;
     }
 
     // ---- UI --------------------------------------------------------------------------------
@@ -662,11 +668,14 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
         }
         DbfColumnDef newDef = dialog.getResult();
 
+        // Snapshot the column's values on the EDT, then convert off the EDT: converting every value
+        // (parse/re-encode per cell) over a large file would otherwise freeze the UI. The conversion
+        // reads only this snapshot, not the live model, so it needs no lock of its own; `busy` keeps
+        // the model from changing structurally before the converted values are written back.
         List<Object> source = model.getDocument().getRows().stream()
                 .map(r -> r.get(modelColumn))
                 .collect(Collectors.toList());
-        DbfTypeConverter.Result result =
-                DbfTypeConverter.convert(source, oldDef, newDef, model.getDocument().getCharset());
+        Charset charset = model.getDocument().getCharset();
 
         Map<String, Integer> widths = currentColumnWidths();
         // The edited column may have been renamed; carry its width over to the new name so the
@@ -675,10 +684,31 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
         if (editedWidth != null) {
             widths.put(newDef.getName(), editedWidth);
         }
+
+        beginBusy("editor.status.converting");
+        AppExecutorUtil.getAppExecutorService().execute(() -> {
+            DbfTypeConverter.Result result = DbfTypeConverter.convert(source, oldDef, newDef, charset);
+            ApplicationManager.getApplication().invokeLater(
+                    () -> finishEditColumn(modelColumn, newDef, result, widths),
+                    ModalityState.nonModal(), o -> disposed);
+        });
+    }
+
+    /** Applies a completed column conversion on the EDT: swaps the column def/values and refreshes the UI. */
+    private void finishEditColumn(int modelColumn, @NotNull DbfColumnDef newDef,
+                                  @NotNull DbfTypeConverter.Result result, @NotNull Map<String, Integer> widths) {
+        if (disposed) {
+            return;
+        }
+        // A cell edit may have been started in the brief window before the table was disabled; cancel it
+        // (its value is about to be overwritten by the conversion anyway) so the structural change below
+        // does not leave a stray editor open.
+        cancelEditing();
         model.updateColumn(modelColumn, newDef, result.values);
         installColumnRenderers();
         search.onModelChanged();
         restoreColumnWidths(widths);
+        endBusy();
 
         if (result.clearedCount > 0) {
             Messages.showWarningDialog(project,
@@ -752,7 +782,7 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
     // ---- encoding --------------------------------------------------------------------------
 
     private void onEncodingChanged() {
-        if (suppressEncodingEvent || loading || saving) {
+        if (suppressEncodingEvent || loading || busy) {
             return;
         }
         Charset selected = (Charset) encodingCombo.getSelectedItem();
@@ -823,17 +853,7 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
      * under the background serialization — no snapshot is needed.
      */
     private void beginSave(@NotNull DbfDocument document) {
-        saving = true;
-        // Gating (editingReady) already blocks the toolbar/shortcuts — and so every structural change —
-        // the instant `saving` flips. Disabling the table (which also blocks a cell edit, the one
-        // mutation not gated that way) is deferred: a fast save finishes before the delay and never
-        // flashes the table disabled, while a slow one takes the lock before the serialization runs.
-        savingUiAlarm.cancelAllRequests();
-        savingUiAlarm.addRequest(() -> {
-            if (saving) {
-                setSavingUi(true);
-            }
-        }, LOADING_START_DELAY_MS);
+        beginBusy("editor.status.saving");
         AppExecutorUtil.getAppExecutorService().execute(() -> {
             boolean changedOnDisk = saveManager.isModifiedOnDisk();
             ApplicationManager.getApplication().invokeLater(
@@ -852,19 +872,19 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
         if (changedOnDisk) {
             DbfSaveManager.ConflictChoice choice = saveManager.askConflict();
             if (choice == DbfSaveManager.ConflictChoice.RELOAD) {
-                endSave();
+                endBusy();
                 reloadFromDisk();
                 return;
             }
             if (choice == DbfSaveManager.ConflictChoice.CANCEL) {
-                endSave();
+                endBusy();
                 return;
             }
             // OVERWRITE: fall through and write our version.
         }
         int deleted = document.getDeletedRecordCount();
         if (deleted > 0 && !saveManager.confirmDeletedRecords(deleted)) {
-            endSave();
+            endBusy();
             return;
         }
         AppExecutorUtil.getAppExecutorService().execute(() -> {
@@ -895,7 +915,7 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
         // The rewritten file no longer contains the deleted-marked records, so stop warning about them
         // (cleared before the modified flag flips, so the status bar refreshes without them).
         document.setDeletedRecordCount(0);
-        endSave();
+        endBusy();
         setModified(false);
     }
 
@@ -904,21 +924,40 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
             return;
         }
         saveManager.showSaveError(error);
-        endSave();
-    }
-
-    private void endSave() {
-        saving = false;
-        savingUiAlarm.cancelAllRequests();
-        setSavingUi(false);
+        endBusy();
     }
 
     /**
-     * Blocks or unblocks editing while a save is in flight: disabling the table stops a cell edit from
-     * mutating the document under the background serialization (the toolbar actions are already gated by
+     * Enters the "busy" state for a background editor op: gating (via {@link #editingReady}) blocks the
+     * toolbar/shortcuts — and so every structural change — the instant {@code busy} flips. Disabling the
+     * table (which also blocks a cell edit, the one mutation not gated that way) is deferred so a fast op
+     * finishes before the delay and never flashes the table disabled, while a slow one takes the lock
+     * before its background work runs.
+     */
+    private void beginBusy(@NotNull String statusKey) {
+        busy = true;
+        busyStatusKey = statusKey;
+        busyUiAlarm.cancelAllRequests();
+        busyUiAlarm.addRequest(() -> {
+            if (busy) {
+                setBusyUi(true);
+            }
+        }, LOADING_START_DELAY_MS);
+    }
+
+    private void endBusy() {
+        busy = false;
+        busyStatusKey = null;
+        busyUiAlarm.cancelAllRequests();
+        setBusyUi(false);
+    }
+
+    /**
+     * Blocks or unblocks editing while a background op is in flight: disabling the table stops a cell
+     * edit from mutating the document under the background work (the toolbar actions are already gated by
      * {@link #editingReady}), and the status bar shows the in-progress state.
      */
-    private void setSavingUi(boolean active) {
+    private void setBusyUi(boolean active) {
         table.setEnabled(!active);
         encodingCombo.setEnabled(!active);
         updateStatus();
@@ -1017,8 +1056,8 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
         if (modified) {
             sb.append("  |  ").append(DbfBundle.message("editor.status.modified"));
         }
-        if (saving) {
-            sb.append("  |  ").append(DbfBundle.message("editor.status.saving"));
+        if (busy && busyStatusKey != null) {
+            sb.append("  |  ").append(DbfBundle.message(busyStatusKey));
         }
         statusLabel.setText(sb.toString());
     }
