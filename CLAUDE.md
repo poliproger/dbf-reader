@@ -54,16 +54,28 @@ out via the writer on save.
   pooled thread + `invokeLater`) so a large `.dbf` does not freeze the UI; a `JBLoadingPanel` shows
   a spinner meanwhile, and the same path serves the initial open, an encoding change and a
   reload-from-disk. Because the model is now `null` until the background load finishes, every
-  toolbar action / shortcut gates on `editingReady()` (`model != null && !loadError && !loading`).
+  toolbar action / shortcut gates on `editingReady()` (`model != null && !loadError && !loading &&
+  !busy`), where `busy` marks an in-flight background save or column conversion. The two long-running
+  edits run off the EDT too (`beginSave`, `editSelectedColumn`): they snapshot what they need, do the
+  heavy work on a pooled thread and apply it back via `invokeLater`, with the `busy` state disabling
+  the table (deferred by `LOADING_START_DELAY_MS`, like the load spinner) so the model can't change
+  under the background work.
 - **`editor/DbfSearchController`** — the Cmd-F search bar: a debounced match pass over the whole
   table, match shading via `ui/cell/CellSearchHighlighter`, an "N of M" counter, Match Case / Whole
   Words / Regex toggles and an optional row filter (a `TableRowSorter` used for *filtering only*,
   sorting disabled). The sorter must be detached before swapping table models (`detachRowSorter`).
-  The pure matching logic lives in `ui/DbfTableSearch` (Swing-free, tested).
-- **`editor/DbfSaveManager`** — the write-back side of the editor: serializes the document, writes
-  it via `WriteCommandAction` + `setBinaryContent`, makes the optional one-time `.bak` backup and
-  runs the external-change conflict check. `save()` returns a `SaveResult` (SAVED /
-  RELOAD_REQUESTED / CANCELLED) that tells the editor whether to clear its modified flag or reload.
+  The match pass itself runs **off the EDT**: the controller snapshots the rows/column defs on the
+  EDT and scans on a pooled thread, dropping a pass superseded by a newer query / model change / close
+  via a `searchSeq` generation counter. The pure matching logic lives in `ui/DbfTableSearch`
+  (Swing-free, tested); its background overload polls a cancellation check and returns `null` when
+  superseded.
+- **`editor/DbfSaveManager`** — the write-back side of the editor: the optional one-time `.bak`
+  backup, the external-change conflict check and the final `WriteCommandAction` + `setBinaryContent`.
+  Exposes the save steps individually — a background-safe `isModifiedOnDisk()`, the EDT dialogs
+  (`askConflict` / `confirmDeletedRecords`) and the EDT `commit(bytes)` — so the editor can run the
+  disk re-read/hash and the serialization off the EDT and keep only the dialogs and write command on
+  it. (Closing still saves synchronously via `saveBlocking`, since the async continuations expire on
+  dispose.)
 - **`editor/DbfColumnNavigator`** — the Cmd-F12 "Go to Column" speed-search popup.
 - **`model/`** — `DbfDocument` (columns + rows + charset + header signature byte), `DbfColumnDef`,
   `DbfRow` (values stored in a `List` so add/remove-column is cheap), `DbfTableModel` (the
@@ -85,7 +97,8 @@ out via the writer on save.
 
 - **javadbf has no in-place editing.** The whole file is loaded into `DbfDocument`, mutated in memory,
   and rewritten as a whole on save. Binary files have no platform `Document`, so save is explicit:
-  a toolbar button + the SaveAll shortcut, writing via `WriteCommandAction` + `setBinaryContent`.
+  a toolbar button + the SaveAll shortcut. The whole-document serialization runs off the EDT and only
+  the `WriteCommandAction` + `setBinaryContent` write stays on it (see `DbfSaveManager`).
   Optionally, the original is copied to a one-time `<name>.dbf.bak` backup before the first save of a
   session — gated by `DbfSettings.createBackupOnSave`, **off by default** and toggled in
   Settings | Tools | DBF Reader.
