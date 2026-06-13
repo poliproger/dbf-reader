@@ -4,6 +4,7 @@ import com.intellij.openapi.command.WriteCommandAction;
 import com.intellij.openapi.diagnostic.Logger;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.ui.Messages;
+import com.intellij.openapi.vfs.LargeFileWriteRequestor;
 import com.intellij.openapi.vfs.VirtualFile;
 import com.poliproger.dbfreader.DbfBundle;
 import com.poliproger.dbfreader.settings.DbfSettings;
@@ -25,8 +26,13 @@ import java.util.Arrays;
  * run the heavy parts — the disk re-read/hash of {@link #isModifiedOnDisk()} and (in the editor)
  * the document serialization — off the EDT, and keep only the user dialogs and the
  * {@link #commit(byte[]) write command} (which must run on the EDT) there.
+ *
+ * <p>Implements {@link LargeFileWriteRequestor} and passes {@code this} as the write requestor so
+ * {@code setBinaryContent} skips its "file too large" guard: a {@code .dbf} can legitimately exceed
+ * the VFS size limit (it is opened via the background large-file path), and without this the write
+ * fails with {@code FileTooBigException}.
  */
-final class DbfSaveManager {
+final class DbfSaveManager implements LargeFileWriteRequestor {
 
     private static final Logger LOG = Logger.getInstance(DbfSaveManager.class);
 
@@ -115,7 +121,9 @@ final class DbfSaveManager {
                             createBackup();
                             backupCreated = true;
                         }
-                        file.setBinaryContent(bytes);
+                        // `this` (a LargeFileWriteRequestor) as the requestor bypasses the VFS
+                        // file-too-large guard, so a large .dbf can be written back.
+                        file.setBinaryContent(bytes, -1L, -1L, this);
                     } catch (IOException io) {
                         throw new RuntimeException(io);
                     }
@@ -135,7 +143,8 @@ final class DbfSaveManager {
         if (backup == null) {
             backup = parent.createChildData(this, backupName);
         }
-        backup.setBinaryContent(readAllBytes());
+        // Bypass the VFS file-too-large guard (see commit); the backup of a large .dbf is just as large.
+        backup.setBinaryContent(readAllBytes(), -1L, -1L, this);
     }
 
     /**
