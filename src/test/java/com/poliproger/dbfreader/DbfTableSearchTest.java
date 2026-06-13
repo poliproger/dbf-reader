@@ -18,6 +18,8 @@ import java.util.List;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 /**
@@ -145,6 +147,37 @@ public class DbfTableSearchTest {
         // The boundary on the word-character edge stays enforced: a partial word still does not match.
         DbfDocument doc = quotedDoc();
         assertEquals(0, DbfTableSearch.find(doc, new DbfTableSearch.Query("widge", false, false, true)).matches().length);
+    }
+
+    @Test
+    public void cancelledScanReturnsNullNotEmpty() throws Exception {
+        // The background overload returns null when cancelled mid-scan — a stale result the caller must
+        // drop — which is distinct from an empty (completed, no-match) result.
+        DbfDocument doc = document();
+        assertNull(DbfTableSearch.find(snapshotRows(doc), snapshotDefs(doc),
+                new DbfTableSearch.Query("alice", false, false, false), () -> true));
+    }
+
+    @Test
+    public void snapshotScanMatchesDocumentScan() throws Exception {
+        // The snapshot overload must produce the same matches as scanning the document directly.
+        DbfDocument doc = document();
+        DbfTableSearch.Query query = new DbfTableSearch.Query("alice", false, false, false);
+        DbfTableSearch.Result snap = DbfTableSearch.find(snapshotRows(doc), snapshotDefs(doc), query, () -> false);
+        assertNotNull(snap);
+        assertArrayEquals(DbfTableSearch.find(doc, query).matches(), snap.matches());
+    }
+
+    private static DbfRow[] snapshotRows(DbfDocument doc) {
+        return doc.getRows().toArray(new DbfRow[0]);
+    }
+
+    private static DbfColumnDef[] snapshotDefs(DbfDocument doc) {
+        DbfColumnDef[] defs = new DbfColumnDef[doc.getColumnCount()];
+        for (int c = 0; c < defs.length; c++) {
+            defs[c] = doc.getColumn(c);
+        }
+        return defs;
     }
 
     private static DbfDocument quotedDoc() {

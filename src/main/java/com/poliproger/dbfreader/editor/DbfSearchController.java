@@ -9,17 +9,24 @@ import com.intellij.openapi.actionSystem.AnActionEvent;
 import com.intellij.openapi.actionSystem.CommonShortcuts;
 import com.intellij.openapi.actionSystem.CustomShortcutSet;
 import com.intellij.openapi.actionSystem.DefaultActionGroup;
+import com.intellij.openapi.application.ApplicationManager;
+import com.intellij.openapi.application.ModalityState;
 import com.intellij.openapi.project.DumbAwareAction;
 import com.intellij.openapi.project.DumbAwareToggleAction;
+import com.intellij.openapi.util.Disposer;
 import com.intellij.ui.DocumentAdapter;
 import com.intellij.ui.LightColors;
 import com.intellij.ui.SearchTextField;
 import com.intellij.ui.components.JBLabel;
 import com.intellij.ui.table.JBTable;
 import com.intellij.util.Alarm;
+import com.intellij.util.concurrency.AppExecutorUtil;
 import com.intellij.util.ui.JBUI;
 import com.intellij.util.ui.UIUtil;
 import com.poliproger.dbfreader.DbfBundle;
+import com.poliproger.dbfreader.model.DbfColumnDef;
+import com.poliproger.dbfreader.model.DbfDocument;
+import com.poliproger.dbfreader.model.DbfRow;
 import com.poliproger.dbfreader.model.DbfTableModel;
 import com.poliproger.dbfreader.ui.DbfTableSearch;
 import com.poliproger.dbfreader.ui.FilterOnlyRowSorter;
@@ -78,12 +85,23 @@ final class DbfSearchController implements CellSearchHighlighter {
     private int currentIndex = -1;
     private long lastCurrentCell = -1;
 
+    /**
+     * Monotonic id of the most recently requested match pass, bumped on the EDT for every (re)compute,
+     * model change and close. The background scan captures its id and is discarded — both early (the
+     * scan polls this) and on completion (the apply step checks it) — once a newer request supersedes
+     * it. {@code volatile}: written on the EDT, read on the scan thread.
+     */
+    private volatile long searchSeq;
+    /** Set when the parent editor is disposed; gates the background apply step. */
+    private volatile boolean disposed;
+
     private final Color defaultFieldBackground;
 
     DbfSearchController(@NotNull JBTable table, @NotNull Disposable parent) {
         this.table = table;
         this.alarm = new Alarm(Alarm.ThreadToUse.SWING_THREAD, parent);
         this.defaultFieldBackground = searchField.getTextEditor().getBackground();
+        Disposer.register(parent, () -> disposed = true);
         buildBar();
     }
 
@@ -218,6 +236,9 @@ final class DbfSearchController implements CellSearchHighlighter {
 
     void close() {
         alarm.cancelAllRequests();
+        // Stop any in-flight background scan early (its result would be dropped anyway, but a large-file
+        // scan should not keep running after the bar is gone).
+        searchSeq++;
         bar.setVisible(false);
         bar.revalidate();
         bar.repaint();
@@ -231,7 +252,10 @@ final class DbfSearchController implements CellSearchHighlighter {
     /** The table model changed (edit, row/column op, reload): refresh matches if the bar is open. */
     void onModelChanged() {
         if (bar.isVisible()) {
-            // Refresh the highlights/counter without yanking the selection away from what the user edits.
+            // Invalidate any in-flight scan at once: it ran on a now-stale snapshot, so its result must
+            // not land. The debounce below restarts the scan against the changed model. Refreshes the
+            // highlights/counter without yanking the selection away from what the user edits.
+            searchSeq++;
             scheduleRecompute(false);
         }
     }
@@ -248,16 +272,53 @@ final class DbfSearchController implements CellSearchHighlighter {
      * {@code true} (typing, activation, an option toggle) the selection jumps to the current match;
      * when {@code false} (a refresh triggered by an edit elsewhere in the table) the user's selection
      * is left where it is.
+     *
+     * <p>The scan itself (format + regex over every cell) runs off the EDT: on a large file it would
+     * otherwise freeze the UI, and the debounce only delays its start, not its cost. The row references
+     * and column defs are snapshotted here on the EDT so the scan reads a stable view while the user
+     * may keep editing the live model; the result is applied back on the EDT, and a pass superseded by
+     * a newer request is dropped via {@link #searchSeq}.
      */
     private void recompute(boolean moveSelection) {
         if (!bar.isVisible()) {
             return;
         }
+        long seq = ++searchSeq;
         DbfTableModel model = (DbfTableModel) table.getModel();
+        DbfDocument doc = model.getDocument();
         DbfTableSearch.Query query = new DbfTableSearch.Query(
                 searchField.getText(), matchCase, regex, wholeWords);
-        DbfTableSearch.Result result = DbfTableSearch.find(model.getDocument(), query);
 
+        // A blank query matches nothing and is cheap to apply; skip the background hop so clearing the
+        // field updates instantly.
+        if (query.text().isEmpty()) {
+            applyResult(DbfTableSearch.Result.EMPTY, query, moveSelection);
+            return;
+        }
+
+        DbfRow[] rows = doc.getRows().toArray(new DbfRow[0]);
+        DbfColumnDef[] defs = new DbfColumnDef[doc.getColumnCount()];
+        for (int c = 0; c < defs.length; c++) {
+            defs[c] = doc.getColumn(c);
+        }
+        AppExecutorUtil.getAppExecutorService().execute(() -> {
+            DbfTableSearch.Result result = DbfTableSearch.find(rows, defs, query, () -> searchSeq != seq);
+            if (result == null) {
+                return;  // superseded or aborted mid-scan; a newer pass will (or already did) apply
+            }
+            ApplicationManager.getApplication().invokeLater(
+                    () -> {
+                        if (!disposed && bar.isVisible() && searchSeq == seq) {
+                            applyResult(result, query, moveSelection);
+                        }
+                    },
+                    ModalityState.any(), o -> disposed);
+        });
+    }
+
+    /** Applies a completed match pass on the EDT: refreshes the matches, filter, counter and selection. */
+    private void applyResult(@NotNull DbfTableSearch.Result result, @NotNull DbfTableSearch.Query query,
+                             boolean moveSelection) {
         matches = result.matches();
         matchRows.clear();
         for (long cell : matches) {

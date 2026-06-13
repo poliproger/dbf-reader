@@ -4,8 +4,9 @@ import com.poliproger.dbfreader.model.DbfColumnDef;
 import com.poliproger.dbfreader.model.DbfDocument;
 import com.poliproger.dbfreader.model.DbfRow;
 import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
 
-import java.util.List;
+import java.util.function.BooleanSupplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
@@ -53,7 +54,39 @@ public final class DbfTableSearch {
         return (int) cell;
     }
 
+    /**
+     * Convenience overload that snapshots {@code doc} and scans it to completion (no cancellation).
+     * Used by the tests and any synchronous caller; the editor uses {@link #find(DbfRow[],
+     * DbfColumnDef[], Query, BooleanSupplier)} to scan off the EDT.
+     */
     public static @NotNull Result find(@NotNull DbfDocument doc, @NotNull Query query) {
+        int columnCount = doc.getColumnCount();
+        DbfColumnDef[] defs = new DbfColumnDef[columnCount];
+        for (int c = 0; c < columnCount; c++) {
+            defs[c] = doc.getColumn(c);
+        }
+        Result result = find(doc.getRows().toArray(new DbfRow[0]), defs, query, () -> false);
+        // The no-cancel scan above never returns null; fall back to EMPTY to keep the contract non-null.
+        return result != null ? result : Result.EMPTY;
+    }
+
+    /**
+     * Scans a pre-captured snapshot of the table — the {@code rows} references and {@code defs} the
+     * caller took on the EDT — so a whole-table pass (format + regex over rows×columns) can run off
+     * the EDT without freezing the UI on a large file. Polls {@code cancelled} once per row and
+     * returns {@code null} as soon as it fires, so a pass superseded by a newer query (or a model
+     * change) stops early instead of finishing a full scan over a huge table.
+     *
+     * <p>The snapshot fixes the row set and their indices, so rows added/removed on the EDT during the
+     * scan cannot derail it. A column added/removed on the EDT mid-scan can still change a row's value
+     * count under us; that surfaces as an {@link IndexOutOfBoundsException}, caught per row to abandon
+     * the now-stale pass (the model change has already scheduled a fresh one).
+     *
+     * @return the matches, or {@code null} if {@code cancelled} fired (or a structural change aborted
+     * the scan) — a stale result the caller must not apply
+     */
+    public static @Nullable Result find(@NotNull DbfRow @NotNull [] rows, @NotNull DbfColumnDef @NotNull [] defs,
+                                         @NotNull Query query, @NotNull BooleanSupplier cancelled) {
         if (query.text().isEmpty()) {
             return Result.EMPTY;
         }
@@ -64,15 +97,8 @@ public final class DbfTableSearch {
             return Result.BAD;
         }
 
-        int columnCount = doc.getColumnCount();
-        int rowCount = doc.getRowCount();
-        // Column defs don't change across rows; fetch them once instead of per cell.
-        DbfColumnDef[] defs = new DbfColumnDef[columnCount];
-        for (int c = 0; c < columnCount; c++) {
-            defs[c] = doc.getColumn(c);
-        }
-        List<DbfRow> rows = doc.getRows();
-
+        int columnCount = defs.length;
+        int rowCount = rows.length;
         // Start at a small fixed capacity (grown on demand). Don't size from rowCount*columnCount:
         // that product can overflow int for a very large table and yield a negative array size.
         long[] buffer = new long[(rowCount == 0 || columnCount == 0) ? 0 : 16];
@@ -80,22 +106,31 @@ public final class DbfTableSearch {
         // Reuse a single Matcher across all cells (reset per cell) instead of allocating one per cell.
         Matcher matcher = null;
         for (int r = 0; r < rowCount; r++) {
-            DbfRow row = rows.get(r);
-            for (int c = 0; c < columnCount; c++) {
-                String text = DbfValueFormatter.format(row.get(c), defs[c]);
-                if (text.isEmpty()) {
-                    continue;
+            if (cancelled.getAsBoolean()) {
+                return null;
+            }
+            DbfRow row = rows[r];
+            try {
+                for (int c = 0; c < columnCount; c++) {
+                    String text = DbfValueFormatter.format(row.get(c), defs[c]);
+                    if (text.isEmpty()) {
+                        continue;
+                    }
+                    matcher = matcher == null ? pattern.matcher(text) : matcher.reset(text);
+                    if (!matcher.find()) {
+                        continue;
+                    }
+                    if (size == buffer.length) {
+                        long[] grown = new long[Math.max(16, buffer.length * 2)];
+                        System.arraycopy(buffer, 0, grown, 0, size);
+                        buffer = grown;
+                    }
+                    buffer[size++] = encode(r, c);
                 }
-                matcher = matcher == null ? pattern.matcher(text) : matcher.reset(text);
-                if (!matcher.find()) {
-                    continue;
-                }
-                if (size == buffer.length) {
-                    long[] grown = new long[Math.max(16, buffer.length * 2)];
-                    System.arraycopy(buffer, 0, grown, 0, size);
-                    buffer = grown;
-                }
-                buffer[size++] = encode(r, c);
+            } catch (IndexOutOfBoundsException structuralChange) {
+                // A column was added/removed on the EDT mid-scan, shrinking this row's value list:
+                // the snapshot is now stale, so abandon the pass — a fresh one is already scheduled.
+                return null;
             }
         }
         if (size == 0) {
