@@ -12,6 +12,8 @@
 
 ### Fixed
 
+- Saving a very large `.dbf` (above the IDE's file-size limit, for example around 200 MB) no longer
+  fails with a "Cannot save DBF file" error — such files opened fine but could not be saved.
 - A cell edit made at the moment a save started could be lost or written inconsistently; the table
   is now frozen before the file is serialized.
 - A cell edit made at the moment a column's type/size change started could be overwritten when the
@@ -24,6 +26,8 @@
   truncated, matching the warning already shown when a value overflows a numeric field.
 - Adding a row while the search row filter is active now clears the filter so the new row is visible
   and editable, instead of silently creating a hidden row.
+- Rows in a file with no logical (checkbox) column are now the same height as rows in files that have
+  one, so text cells get the same comfortable vertical padding.
 
 ## 1.2.0 - 2026-06-10
 
