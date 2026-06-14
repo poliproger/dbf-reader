@@ -4,6 +4,8 @@
 
 ## Unreleased
 
+## 1.3.0 - 2026-06-14
+
 ### Changed
 
 - Saving a large file now uses much less memory — the new content is streamed out to disk instead
