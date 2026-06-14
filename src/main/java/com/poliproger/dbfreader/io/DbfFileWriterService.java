@@ -1,5 +1,6 @@
 package com.poliproger.dbfreader.io;
 
+import com.linuxense.javadbf.DBFCharsetHelper;
 import com.linuxense.javadbf.DBFDataType;
 import com.linuxense.javadbf.DBFField;
 import com.linuxense.javadbf.DBFWriter;
@@ -14,6 +15,8 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.math.BigDecimal;
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
 import java.util.Date;
 
 /**
@@ -68,7 +71,31 @@ public final class DbfFileWriterService {
             new FileOutputStream(target).close();
             return;
         }
+        if (!canStream(document.getCharset())) {
+            // The File-backed DBFWriter rejects a charset with no DBF language-driver code (throwing in
+            // its constructor before any record is written), while the OutputStream-backed writer accepts
+            // it and just records language-driver 0. Fall back to the in-memory path so such a file saves
+            // exactly as the byte[] overload does, instead of failing the save — at the cost of buffering
+            // it in the heap, acceptable for these uncommon charsets (see canStream).
+            try (FileOutputStream out = new FileOutputStream(target)) {
+                out.write(write(document));
+            }
+            return;
+        }
         serialize(document, new DBFWriter(target, document.getCharset()));
+    }
+
+    /**
+     * Whether the streaming (File-backed) {@link DBFWriter} accepts {@code charset}. Its constructor
+     * throws for a charset that has no DBF language-driver code unless it is UTF-8; the
+     * OutputStream-backed writer has no such check. Mirrors that constructor condition (via javadbf's own
+     * {@link DBFCharsetHelper#getDBFCodeForCharset}) so the editor's save can pick the compatible path
+     * rather than fail on, e.g., KOI8-R or a non-UTF-8 platform default charset for a file that declares
+     * no code page.
+     */
+    private static boolean canStream(@NotNull Charset charset) {
+        return DBFCharsetHelper.getDBFCodeForCharset(charset) != 0
+                || StandardCharsets.UTF_8.equals(charset);
     }
 
     /** Sets the fields and writes every row through {@code writer}, then closes it. */

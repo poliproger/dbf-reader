@@ -9,6 +9,7 @@ import com.poliproger.dbfreader.model.DbfRow;
 import org.junit.Test;
 
 import java.math.BigDecimal;
+import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -106,6 +107,20 @@ public class DbfFileWriterServiceTest {
         } finally {
             Files.deleteIfExists(temp);
         }
+    }
+
+    @Test
+    public void streamingWriteHandlesCharsetWithoutDbfCode() throws Exception {
+        // KOI8-R has no DBF language-driver code, so the File-backed DBFWriter rejects it in its
+        // constructor; the streaming path must fall back to the in-memory writer (which accepts it) and
+        // produce the same bytes, so a file in such a charset saves instead of failing. Without the
+        // fallback this throws DBFException("Unsupported charset").
+        DbfDocument doc = new DbfDocument(
+                new ArrayList<>(Collections.singletonList(new DbfColumnDef("NAME", DBFDataType.CHARACTER, 10, 0))),
+                new ArrayList<>(Collections.singletonList(new DbfRow(Collections.singletonList((Object) "тест")))),
+                Charset.forName("KOI8-R"));
+
+        assertArrayEquals(DbfFileWriterService.write(doc), writeToFileBytes(doc));
     }
 
     // ---- hasUnwritableColumns ----------------------------------------------------------------

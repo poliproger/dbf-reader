@@ -14,6 +14,12 @@
 
 - A cell edit made at the moment a save started could be lost or written inconsistently; the table
   is now frozen before the file is serialized.
+- A cell edit made at the moment a column's type/size change started could be overwritten when the
+  converted values were written back; the table is now frozen before the conversion runs, like the
+  save path.
+- Saving a file whose character encoding has no DBF code-page byte (for example KOI8-R, or a
+  non-UTF-8 system default charset when the file itself declares none) no longer fails with an
+  "Unsupported charset" error.
 - Shrinking a text column's size now warns when existing values are too long to fit and would be
   truncated, matching the warning already shown when a value overflows a numeric field.
 - Adding a row while the search row filter is active now clears the filter so the new row is visible

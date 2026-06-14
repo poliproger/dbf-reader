@@ -730,6 +730,14 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
         }
 
         beginBusy("editor.status.converting");
+        // Freeze the model synchronously before the off-EDT conversion runs. The busy alarm that disables
+        // the table is deferred (anti-flicker) and may not have fired yet, so without this a cell edit
+        // committed into this column in that window would be silently overwritten when finishEditColumn
+        // writes the converted values (built from the snapshot above) back over the whole column. Cancel
+        // any open editor (its value would be discarded by the conversion anyway) and disable the table
+        // now, so no edit can land before finishEditColumn. (Mirrors afterDiskCheck on the save path.)
+        cancelEditing();
+        setBusyUi(true);
         AppExecutorUtil.getAppExecutorService().execute(() -> {
             DbfTypeConverter.Result result = DbfTypeConverter.convert(source, oldDef, newDef, charset);
             ApplicationManager.getApplication().invokeLater(
