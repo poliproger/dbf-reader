@@ -41,6 +41,25 @@ public final class DbfTableSearch {
         private static final Result BAD = new Result(new long[0], true);
     }
 
+    /**
+     * Aggregated result of {@link #scan} — enough to drive the highlight, navigation and the exact "N of
+     * M" counter <em>without</em> storing a coordinate per matching cell (which on a huge file with a
+     * broad query is the editor's memory cliff). See {@code notes/search-wide-query-memory.md}.
+     *
+     * @param rowMatchCount number of matching cells in each model row (index = model row); all-zero when
+     *                      nothing matched, length 0 only for {@link #BAD}
+     * @param total         total number of matching cells (= sum of {@code rowMatchCount}); the M
+     * @param currentCell   the match to select — the first one at or after {@code anchor} in row-major
+     *                      order, wrapping to the very first match; -1 when there are no matches
+     * @param currentIndex  0-based rank of {@code currentCell} among all matches (the N-1); -1 when none
+     * @param badPattern    {@code true} only when a regex query failed to compile (as in {@link Result})
+     */
+    public record ScanResult(int @NotNull [] rowMatchCount, int total, long currentCell, int currentIndex,
+                             boolean badPattern) {
+
+        private static final ScanResult BAD = new ScanResult(new int[0], 0, -1, -1, true);
+    }
+
     /** Packs a cell coordinate into a single {@code long} (row in the high word, column in the low word). */
     public static long encode(int row, int column) {
         return ((long) row << 32) | (column & 0xffffffffL);
@@ -142,6 +161,84 @@ public final class DbfTableSearch {
     }
 
     /**
+     * Like {@link #find(DbfRow[], DbfColumnDef[], Query, BooleanSupplier)}, but aggregates into a
+     * {@link ScanResult} instead of materialising one {@code long} per matching cell. A broad query
+     * (e.g. {@code "a"}) over a large file matches a huge number of cells, so storing each coordinate is
+     * the editor's memory cliff; here the only per-row allocation is an {@code int} count, and the cell
+     * highlight is recomputed live by the caller via {@link #matches(Pattern, Object, DbfColumnDef)}.
+     *
+     * <p>In one row-major pass it also picks the match to select — the first cell at or after
+     * {@code anchor} (the caller's last selected cell, encoded; pass -1 for "from the top"), wrapping to
+     * the first match — and that cell's rank, so the caller needn't keep the coordinates to compute the
+     * "N of M" counter. Cancellation and the structural-change guard behave exactly as in {@code find}.
+     *
+     * @return the aggregate, or {@code null} if {@code cancelled} fired or a structural change aborted
+     * the scan — a stale result the caller must not apply
+     */
+    public static @Nullable ScanResult scan(@NotNull DbfRow @NotNull [] rows, @NotNull DbfColumnDef @NotNull [] defs,
+                                             @NotNull Query query, long anchor, @NotNull BooleanSupplier cancelled) {
+        if (query.text().isEmpty()) {
+            return new ScanResult(new int[rows.length], 0, -1, -1, false);
+        }
+        Pattern pattern;
+        try {
+            pattern = compile(query);
+        } catch (PatternSyntaxException e) {
+            return ScanResult.BAD;
+        }
+
+        int columnCount = defs.length;
+        int rowCount = rows.length;
+        int[] rowMatchCount = new int[rowCount];
+        int total = 0;
+        long firstAtOrAfter = -1;  // first match with coordinate >= anchor
+        int firstRank = -1;
+        long firstOverall = -1;    // very first match, for wrap-around when anchor is past the last match
+        Matcher matcher = null;
+        for (int r = 0; r < rowCount; r++) {
+            if (cancelled.getAsBoolean()) {
+                return null;
+            }
+            DbfRow row = rows[r];
+            int rowMatches = 0;
+            try {
+                for (int c = 0; c < columnCount; c++) {
+                    String text = DbfValueFormatter.format(row.get(c), defs[c]);
+                    if (text.isEmpty()) {
+                        continue;
+                    }
+                    matcher = matcher == null ? pattern.matcher(text) : matcher.reset(text);
+                    if (!matcher.find()) {
+                        continue;
+                    }
+                    long cell = encode(r, c);
+                    if (firstOverall < 0) {
+                        firstOverall = cell;
+                    }
+                    if (firstAtOrAfter < 0 && cell >= anchor) {
+                        firstAtOrAfter = cell;
+                        firstRank = total;  // total so far == this match's 0-based rank
+                    }
+                    total++;
+                    rowMatches++;
+                }
+            } catch (IndexOutOfBoundsException structuralChange) {
+                // A column was added/removed on the EDT mid-scan: the snapshot is stale, abandon the pass.
+                return null;
+            }
+            rowMatchCount[r] = rowMatches;
+        }
+        if (total == 0) {
+            return new ScanResult(rowMatchCount, 0, -1, -1, false);
+        }
+        if (firstAtOrAfter < 0) {  // anchor is past the last match — wrap to the first
+            firstAtOrAfter = firstOverall;
+            firstRank = 0;
+        }
+        return new ScanResult(rowMatchCount, total, firstAtOrAfter, firstRank, false);
+    }
+
+    /**
      * Whether a single cell's displayed text matches {@code query} — one iteration of {@link #find},
      * letting the editor re-evaluate just an edited cell instead of rescanning the whole table.
      * Returns {@code false} for a blank query or an invalid regex (consistent with {@code find}
@@ -157,11 +254,22 @@ public final class DbfTableSearch {
         } catch (PatternSyntaxException e) {
             return false;
         }
+        return matches(pattern, value, def);
+    }
+
+    /**
+     * Whether a single cell's displayed text matches an already-compiled {@code pattern}. Lets a caller
+     * compile once (per query) and reuse it across many cells — the editor caches the pattern and calls
+     * this for every visible cell on repaint (its live highlight) and during prev/next navigation,
+     * instead of recompiling the regex per cell.
+     */
+    public static boolean matches(@NotNull Pattern pattern, @Nullable Object value, @NotNull DbfColumnDef def) {
         String text = DbfValueFormatter.format(value, def);
         return !text.isEmpty() && pattern.matcher(text).find();
     }
 
-    private static @NotNull Pattern compile(@NotNull Query query) {
+    /** Compiles {@code query} into a {@link Pattern}; throws {@link PatternSyntaxException} for a bad regex. */
+    public static @NotNull Pattern compile(@NotNull Query query) {
         String base = query.regex() ? query.text() : Pattern.quote(query.text());
         if (query.wholeWords()) {
             base = wrapWholeWords(query, base);

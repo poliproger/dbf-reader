@@ -44,8 +44,9 @@ import javax.swing.table.TableRowSorter;
 import java.awt.BorderLayout;
 import java.awt.Color;
 import java.awt.FlowLayout;
-import java.util.Arrays;
 import java.util.BitSet;
+import java.util.regex.Pattern;
+import java.util.regex.PatternSyntaxException;
 
 /**
  * The Cmd-F search bar over the DBF table: a hidden-by-default toolbar that, when activated,
@@ -72,20 +73,36 @@ final class DbfSearchController implements CellSearchHighlighter {
     private boolean filter;
 
     /**
-     * Matches in row-major order, each encoded by {@link DbfTableSearch#encode}. Sorted ascending (the
-     * scan appends row-major), so {@link #isMatch} can binary-search it instead of keeping a parallel
-     * boxed {@code Set} — important when a broad query matches a huge number of cells.
+     * Number of matching cells in each model row (index = model row), or {@code null} for a blank/invalid
+     * query. Drives the exact "N of M" counter and the incremental single-cell update without storing a
+     * coordinate per matching cell — the per-cell highlight is recomputed live in {@link #isMatch}. This
+     * is the {@code O(rows)} state that replaces the old {@code O(matched cells)} array; see
+     * {@code notes/search-wide-query-memory.md} (variant B + per-row counts).
      */
-    private long[] matches = new long[0];
+    private int @Nullable [] rowMatchCount;
+    /** Total number of matching cells (= sum of {@link #rowMatchCount}); the M in the "N of M" counter. */
+    private int total;
     /**
-     * Model rows that have at least one matching cell; drives the optional row filter. A {@link BitSet}
-     * (rows are dense, {@code 0..rowCount}) avoids boxing one {@code Integer} per matching row.
+     * Model rows that have at least one matching cell; drives the row filter and the prev/next navigation
+     * (fast {@code nextSetBit}/{@code previousSetBit} over matching rows). Kept in sync with
+     * {@link #rowMatchCount} ({@code matchRows.get(r) == rowMatchCount[r] > 0}). A {@link BitSet} (rows are
+     * dense, {@code 0..rowCount}) avoids boxing one {@code Integer} per matching row.
      */
     private final BitSet matchRows = new BitSet();
     /** Non-null only while {@link #filter} is on and the bar is open; hides non-matching rows. */
     private TableRowSorter<DbfTableModel> sorter;
+    /** Encoded coordinate of the current match (shown by the selection), or -1 when there is none. */
+    private long currentCell = -1;
+    /** 0-based rank of {@link #currentCell} among all matches; the N-1 in the "N of M" counter. */
     private int currentIndex = -1;
+    /** Anchor for the next scan: the last cell the selection was moved to (row-major). */
     private long lastCurrentCell = -1;
+    /**
+     * Compiled pattern for the active query, cached so the renderer's {@link #isMatch} (called per visible
+     * cell on every repaint) and navigation needn't recompile the regex per cell. {@code null} for a
+     * blank/invalid query. Set on the EDT in {@link #applyScan}/{@link #applyEmpty} with the match data.
+     */
+    private @Nullable Pattern matchPattern;
 
     /**
      * Monotonic id of the most recently requested match pass, bumped on the EDT for every (re)compute,
@@ -95,7 +112,7 @@ final class DbfSearchController implements CellSearchHighlighter {
      */
     private volatile long searchSeq;
     /**
-     * The {@link #searchSeq} of the last result applied to {@link #matches} (EDT-only). When it equals
+     * The {@link #searchSeq} of the last scan applied to {@link #rowMatchCount} (EDT-only). When it equals
      * {@code searchSeq} the match set is final for the current query, so a single-cell edit can patch it
      * in place; otherwise a scan is still in flight and the edit falls back to a full rescan.
      */
@@ -321,7 +338,7 @@ final class DbfSearchController implements CellSearchHighlighter {
         // A blank query matches nothing and is cheap to apply; skip the background hop so clearing the
         // field updates instantly.
         if (query.text().isEmpty()) {
-            applyResult(DbfTableSearch.Result.EMPTY, query, moveSelection, seq);
+            applyEmpty(seq);
             return;
         }
 
@@ -330,15 +347,16 @@ final class DbfSearchController implements CellSearchHighlighter {
         for (int c = 0; c < defs.length; c++) {
             defs[c] = doc.getColumn(c);
         }
+        long anchor = lastCurrentCell;  // snapshot the selection anchor on the EDT for the rank computation
         AppExecutorUtil.getAppExecutorService().execute(() -> {
-            DbfTableSearch.Result result = DbfTableSearch.find(rows, defs, query, () -> searchSeq != seq);
+            DbfTableSearch.ScanResult result = DbfTableSearch.scan(rows, defs, query, anchor, () -> searchSeq != seq);
             if (result == null) {
                 return;  // superseded or aborted mid-scan; a newer pass will (or already did) apply
             }
             ApplicationManager.getApplication().invokeLater(
                     () -> {
                         if (!disposed && bar.isVisible() && searchSeq == seq) {
-                            applyResult(result, query, moveSelection, seq);
+                            applyScan(result, query, moveSelection, seq);
                         }
                     },
                     ModalityState.any(), o -> disposed);
@@ -349,44 +367,94 @@ final class DbfSearchController implements CellSearchHighlighter {
         return new DbfTableSearch.Query(searchField.getText(), matchCase, regex, wholeWords);
     }
 
-    /** Applies a completed match pass on the EDT: refreshes the matches, filter, counter and selection. */
-    private void applyResult(@NotNull DbfTableSearch.Result result, @NotNull DbfTableSearch.Query query,
-                             boolean moveSelection, long seq) {
-        appliedSeq = seq;
-        matches = result.matches();
-        matchRows.clear();
-        for (long cell : matches) {
-            matchRows.set(DbfTableSearch.rowOf(cell));
-        }
-        applyFilter();
-        refreshMatchState(query.text().isEmpty(), result.badPattern(), moveSelection);
-    }
-
     /**
-     * Refreshes the counter, current-match index, field-error shade and repaint from the current
-     * {@link #matches}. Shared by the full-scan apply and the incremental single-cell update.
+     * Applies a completed scan on the EDT: caches the pattern, swaps in the per-row counts, rebuilds the
+     * matching-row set and the filter, and updates the counter/selection. {@code moveSelection} jumps the
+     * selection to the current match (typing/activation/toggle); otherwise the selection is left in place
+     * (a refresh after an edit elsewhere).
      */
-    private void refreshMatchState(boolean blankQuery, boolean badPattern, boolean moveSelection) {
-        if (matches.length == 0) {
-            currentIndex = -1;
-            setFieldError(!blankQuery);
-            countLabel.setText(blankQuery ? "" : DbfBundle.message(
-                    badPattern ? "editor.search.badRegex" : "editor.search.noMatches"));
+    private void applyScan(@NotNull DbfTableSearch.ScanResult result, @NotNull DbfTableSearch.Query query,
+                           boolean moveSelection, long seq) {
+        appliedSeq = seq;
+        if (result.badPattern()) {
+            clearMatches();
+            showNoMatches(true);
+            applyFilter();
+            table.repaint();
+            return;
+        }
+        matchPattern = compileQuietly(query);
+        rowMatchCount = result.rowMatchCount();
+        total = result.total();
+        rebuildMatchRows();
+        currentCell = result.currentCell();
+        currentIndex = result.currentIndex();
+        applyFilter();
+        if (total == 0) {
+            showNoMatches(false);
         } else {
             setFieldError(false);
-            currentIndex = indexAtOrAfter(lastCurrentCell);
             if (moveSelection) {
                 selectCurrent();
             } else {
-                countLabel.setText(DbfBundle.message("editor.search.count", currentIndex + 1, matches.length));
+                updateCounter();
             }
         }
         table.repaint();
     }
 
+    /** Applies the blank-query state on the EDT: nothing highlighted, full view restored, counter cleared. */
+    private void applyEmpty(long seq) {
+        appliedSeq = seq;
+        clearMatches();
+        applyFilter();  // empty query → the filter shows all rows
+        table.repaint();
+    }
+
+    /** Rebuilds {@link #matchRows} from {@link #rowMatchCount} ({@code count > 0} ⇒ the row has a match). */
+    private void rebuildMatchRows() {
+        matchRows.clear();
+        if (rowMatchCount == null) {
+            return;
+        }
+        for (int r = 0; r < rowMatchCount.length; r++) {
+            if (rowMatchCount[r] > 0) {
+                matchRows.set(r);
+            }
+        }
+    }
+
+    /** Shows the "N of M" counter for the current match. */
+    private void updateCounter() {
+        countLabel.setText(DbfBundle.message("editor.search.count", currentIndex + 1, total));
+    }
+
+    /** Shows the no-match (or bad-regex) state: red field, message, no current match. */
+    private void showNoMatches(boolean badPattern) {
+        currentCell = -1;
+        currentIndex = -1;
+        setFieldError(true);
+        countLabel.setText(DbfBundle.message(badPattern ? "editor.search.badRegex" : "editor.search.noMatches"));
+    }
+
+    /** Compiles the query for the live highlight; {@code null} for a blank or invalid query. */
+    private static @Nullable Pattern compileQuietly(@NotNull DbfTableSearch.Query query) {
+        if (query.text().isEmpty()) {
+            return null;
+        }
+        try {
+            return DbfTableSearch.compile(query);
+        } catch (PatternSyntaxException e) {
+            return null;
+        }
+    }
+
     /**
      * Updates the match set for a single edited cell without rescanning the table. Falls back to a full
-     * rescan if a scan is still in flight (the match set isn't final, so patching it would corrupt it).
+     * rescan if a scan is still in flight (the per-row counts aren't final, so patching them would corrupt
+     * them). The edited cell's match state changed iff its row's match count changed; that delta (±1, since
+     * only one cell changed) is applied to {@link #total} and {@link #rowMatchCount}, so the "N of M"
+     * counter stays exact without rescanning a large file.
      */
     private void updateCellMatch(int modelRow, int modelColumn) {
         if (searchSeq != appliedSeq) {
@@ -394,116 +462,236 @@ final class DbfSearchController implements CellSearchHighlighter {
             scheduleRecompute(false);
             return;
         }
-        DbfTableSearch.Query query = currentQuery();
-        if (query.text().isEmpty()) {
+        if (matchPattern == null || rowMatchCount == null) {
             return;  // nothing is highlighted; the edited cell repaints itself from the table event
         }
-        DbfDocument doc = ((DbfTableModel) table.getModel()).getDocument();
-        if (modelRow < 0 || modelRow >= doc.getRowCount() || modelColumn < 0 || modelColumn >= doc.getColumnCount()) {
+        DbfDocument doc = document();
+        if (modelRow < 0 || modelRow >= doc.getRowCount() || modelRow >= rowMatchCount.length
+                || modelColumn < 0 || modelColumn >= doc.getColumnCount()) {
             return;
         }
-        boolean nowMatch = DbfTableSearch.matchesCell(
-                doc.getRows().get(modelRow).get(modelColumn), doc.getColumn(modelColumn), query);
-        long cell = DbfTableSearch.encode(modelRow, modelColumn);
-        int idx = Arrays.binarySearch(matches, cell);
-        boolean wasMatch = idx >= 0;
-        if (nowMatch == wasMatch) {
-            return;  // match set unchanged; the cell already repaints itself from the table event
+        int oldRowCount = rowMatchCount[modelRow];
+        int newRowCount = countMatchesInRow(modelRow);
+        if (newRowCount == oldRowCount) {
+            return;  // the edited cell's match state is unchanged; it already repaints itself
         }
-        boolean rowVisibilityChanged;
-        if (nowMatch) {
-            matches = insertAt(matches, -idx - 1, cell);
-            rowVisibilityChanged = !matchRows.get(modelRow);
+        int delta = newRowCount - oldRowCount;  // +1 or -1: only the edited cell changed in this row
+        rowMatchCount[modelRow] = newRowCount;
+        total += delta;
+        boolean rowVisibilityChanged = (oldRowCount == 0) != (newRowCount == 0);
+        if (newRowCount > 0) {
             matchRows.set(modelRow);
         } else {
-            matches = removeAt(matches, idx);
-            rowVisibilityChanged = !rowHasMatch(modelRow);
-            if (rowVisibilityChanged) {
-                matchRows.clear(modelRow);
-            }
+            matchRows.clear(modelRow);
         }
+        updateCurrentAfterEdit(DbfTableSearch.encode(modelRow, modelColumn), delta);
         // Re-apply the filter only when this row just gained/lost its sole match (so it must appear or
         // hide); otherwise its visibility is unchanged and the O(rows) filter pass is unnecessary.
         if (filter && rowVisibilityChanged) {
             applyFilter();
         }
-        refreshMatchState(false, false, false);
+        if (total == 0) {
+            showNoMatches(false);
+        } else {
+            setFieldError(false);
+            updateCounter();
+        }
+        table.repaint();
     }
 
-    /** Whether {@link #matches} still has any cell in {@code modelRow} (matches are sorted row-major). */
-    private boolean rowHasMatch(int modelRow) {
-        int pos = lowerBound(matches, DbfTableSearch.encode(modelRow, 0));
-        return pos < matches.length && DbfTableSearch.rowOf(matches[pos]) == modelRow;
+    /**
+     * Keeps {@link #currentCell}/{@link #currentIndex} consistent after a single-cell edit changed the
+     * match set by {@code delta} (±1) at {@code editedCell}. A match added/removed <em>before</em> the
+     * current one shifts its rank; if the current cell itself stopped matching, the selection moves to the
+     * next match (wrapping), inheriting its rank.
+     */
+    private void updateCurrentAfterEdit(long editedCell, int delta) {
+        if (total == 0) {
+            currentCell = -1;
+            currentIndex = -1;
+        } else if (currentCell < 0) {
+            currentCell = firstMatch();  // there were no matches before; select the first one now
+            currentIndex = 0;
+        } else if (delta > 0) {
+            if (editedCell < currentCell) {
+                currentIndex++;  // a match appeared before the current one
+            }
+        } else if (editedCell == currentCell) {
+            // The selected cell stopped matching: move to the next match. If it wrapped (the removed cell
+            // was the last), the rank resets to 0; otherwise the next cell inherits the removed cell's rank.
+            long next = nextMatch(editedCell);
+            currentCell = next;
+            if (next < editedCell) {
+                currentIndex = 0;
+            }
+        } else if (editedCell < currentCell) {
+            currentIndex--;  // a match disappeared before the current one
+        }
     }
 
-    /** Index of the first element {@code >= key} in the sorted array {@code arr}. */
-    private static int lowerBound(long @NotNull [] arr, long key) {
-        int idx = Arrays.binarySearch(arr, key);
-        return idx >= 0 ? idx : -idx - 1;
+    private @NotNull DbfDocument document() {
+        return ((DbfTableModel) table.getModel()).getDocument();
     }
 
-    private static long @NotNull [] insertAt(long @NotNull [] arr, int pos, long value) {
-        long[] next = new long[arr.length + 1];
-        System.arraycopy(arr, 0, next, 0, pos);
-        next[pos] = value;
-        System.arraycopy(arr, pos, next, pos + 1, arr.length - pos);
-        return next;
+    /** Number of cells matching {@link #matchPattern} in model row {@code r}. */
+    private int countMatchesInRow(int r) {
+        if (matchPattern == null) {
+            return 0;
+        }
+        DbfDocument doc = document();
+        DbfRow row = doc.getRows().get(r);
+        int cols = doc.getColumnCount();
+        int count = 0;
+        for (int c = 0; c < cols; c++) {
+            if (DbfTableSearch.matches(matchPattern, row.get(c), doc.getColumn(c))) {
+                count++;
+            }
+        }
+        return count;
     }
 
-    private static long @NotNull [] removeAt(long @NotNull [] arr, int pos) {
-        long[] next = new long[arr.length - 1];
-        System.arraycopy(arr, 0, next, 0, pos);
-        System.arraycopy(arr, pos + 1, next, pos, arr.length - pos - 1);
-        return next;
+    /** First matching cell in model row {@code r} at a column {@code >= from}, or -1. */
+    private long matchInRowFrom(int r, int from) {
+        if (matchPattern == null) {
+            return -1;
+        }
+        DbfDocument doc = document();
+        if (r < 0 || r >= doc.getRowCount()) {
+            return -1;
+        }
+        DbfRow row = doc.getRows().get(r);
+        int cols = doc.getColumnCount();
+        for (int c = Math.max(from, 0); c < cols; c++) {
+            if (DbfTableSearch.matches(matchPattern, row.get(c), doc.getColumn(c))) {
+                return DbfTableSearch.encode(r, c);
+            }
+        }
+        return -1;
     }
 
-    /** First match at or after {@code anchor} (row-major), wrapping to the first match. */
-    private int indexAtOrAfter(long anchor) {
-        // matches is sorted ascending (row-major), so binary-search the lower bound rather than scan it:
-        // the scan is O(matches) and runs on every refresh — costly when a broad query matches a huge
-        // number of cells. Past the last match, wrap to the first (index 0).
-        int pos = lowerBound(matches, anchor);
-        return pos < matches.length ? pos : 0;
+    /** Last matching cell in model row {@code r} at a column {@code < before}, or -1. */
+    private long matchInRowBefore(int r, int before) {
+        if (matchPattern == null) {
+            return -1;
+        }
+        DbfDocument doc = document();
+        if (r < 0 || r >= doc.getRowCount()) {
+            return -1;
+        }
+        DbfRow row = doc.getRows().get(r);
+        for (int c = Math.min(before, doc.getColumnCount()) - 1; c >= 0; c--) {
+            if (DbfTableSearch.matches(matchPattern, row.get(c), doc.getColumn(c))) {
+                return DbfTableSearch.encode(r, c);
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * First match strictly after {@code cell} in row-major order, wrapping to the first match. Uses
+     * {@link #matchRows} to skip directly to the next row that has a match, then scans that row's columns
+     * live — so a broad query (dense {@code matchRows}) finds the neighbour at once and a narrow one
+     * (sparse {@code matchRows}) skips the empty rows cheaply via {@code nextSetBit}.
+     */
+    private long nextMatch(long cell) {
+        int row = DbfTableSearch.rowOf(cell);
+        long inRow = matchInRowFrom(row, DbfTableSearch.columnOf(cell) + 1);
+        if (inRow >= 0) {
+            return inRow;
+        }
+        for (int r = matchRows.nextSetBit(row + 1); r >= 0; r = matchRows.nextSetBit(r + 1)) {
+            long m = matchInRowFrom(r, 0);
+            if (m >= 0) {
+                return m;
+            }
+        }
+        return firstMatch();  // wrap
+    }
+
+    /** Last match strictly before {@code cell} in row-major order, wrapping to the last match. */
+    private long prevMatch(long cell) {
+        int row = DbfTableSearch.rowOf(cell);
+        long inRow = matchInRowBefore(row, DbfTableSearch.columnOf(cell));
+        if (inRow >= 0) {
+            return inRow;
+        }
+        for (int r = matchRows.previousSetBit(row - 1); r >= 0; r = matchRows.previousSetBit(r - 1)) {
+            long m = matchInRowBefore(r, document().getColumnCount());
+            if (m >= 0) {
+                return m;
+            }
+        }
+        return lastMatch();  // wrap
+    }
+
+    /** The first match in row-major order, or -1 when there are none. */
+    private long firstMatch() {
+        for (int r = matchRows.nextSetBit(0); r >= 0; r = matchRows.nextSetBit(r + 1)) {
+            long m = matchInRowFrom(r, 0);
+            if (m >= 0) {
+                return m;
+            }
+        }
+        return -1;
+    }
+
+    /** The last match in row-major order, or -1 when there are none. */
+    private long lastMatch() {
+        for (int r = matchRows.previousSetBit(matchRows.length()); r >= 0; r = matchRows.previousSetBit(r - 1)) {
+            long m = matchInRowBefore(r, document().getColumnCount());
+            if (m >= 0) {
+                return m;
+            }
+        }
+        return -1;
     }
 
     void findNext() {
-        if (matches.length == 0) {
+        if (total == 0) {
             return;
         }
-        currentIndex = (currentIndex + 1) % matches.length;
+        currentCell = nextMatch(currentCell);
+        currentIndex = (currentIndex + 1) % total;
         selectCurrent();
     }
 
     void findPrev() {
-        if (matches.length == 0) {
+        if (total == 0) {
             return;
         }
-        currentIndex = (currentIndex - 1 + matches.length) % matches.length;
+        currentCell = prevMatch(currentCell);
+        currentIndex = (currentIndex - 1 + total) % total;
         selectCurrent();
     }
 
     /**
-     * Moves the table's cell selection to the current match and scrolls it into view. The current match
+     * Moves the table's cell selection to {@link #currentCell} and scrolls it into view. The current match
      * is shown by the selection itself (so it is highlighted uniformly for every column type, including
      * the Boolean checkbox cells the renderer does not paint); the other matches stay shaded by the
      * renderer.
      */
     private void selectCurrent() {
-        long cell = matches[currentIndex];
-        lastCurrentCell = cell;
-        int viewRow = table.convertRowIndexToView(DbfTableSearch.rowOf(cell));
-        int viewColumn = table.convertColumnIndexToView(DbfTableSearch.columnOf(cell));
+        if (currentCell < 0) {
+            return;
+        }
+        lastCurrentCell = currentCell;
+        int viewRow = table.convertRowIndexToView(DbfTableSearch.rowOf(currentCell));
+        int viewColumn = table.convertColumnIndexToView(DbfTableSearch.columnOf(currentCell));
         if (viewRow >= 0 && viewColumn >= 0) {
             table.changeSelection(viewRow, viewColumn, false, false);
             table.scrollRectToVisible(table.getCellRect(viewRow, viewColumn, true));
         }
-        countLabel.setText(DbfBundle.message("editor.search.count", currentIndex + 1, matches.length));
+        updateCounter();
         table.repaint();
     }
 
+    /** Resets all match state and the bar's counter/field shade (blank query, close, or bad pattern). */
     private void clearMatches() {
-        matches = new long[0];
+        total = 0;
+        rowMatchCount = null;
         matchRows.clear();
+        matchPattern = null;
+        currentCell = -1;
         currentIndex = -1;
         countLabel.setText("");
         setFieldError(false);
@@ -567,8 +755,15 @@ final class DbfSearchController implements CellSearchHighlighter {
 
     @Override
     public boolean isMatch(int modelRow, int modelColumn) {
-        return matches.length > 0
-                && Arrays.binarySearch(matches, DbfTableSearch.encode(modelRow, modelColumn)) >= 0;
+        if (matchPattern == null) {
+            return false;
+        }
+        DbfDocument doc = document();
+        if (modelRow < 0 || modelRow >= doc.getRowCount() || modelColumn < 0 || modelColumn >= doc.getColumnCount()) {
+            return false;
+        }
+        return DbfTableSearch.matches(matchPattern,
+                doc.getRows().get(modelRow).get(modelColumn), doc.getColumn(modelColumn));
     }
 
     // ---- action helpers --------------------------------------------------------------------

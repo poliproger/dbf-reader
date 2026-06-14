@@ -186,6 +186,85 @@ public class DbfTableSearchTest {
                 DbfTableSearch.matchesCell("Alice", name, new DbfTableSearch.Query("[", false, true, false)));
     }
 
+    // ---- scan (the editor's memory-light aggregate: per-row counts + total + anchor-relative current) ----
+
+    private static DbfTableSearch.ScanResult scan(String text, long anchor) throws Exception {
+        DbfDocument doc = document();
+        return DbfTableSearch.scan(snapshotRows(doc), snapshotDefs(doc),
+                new DbfTableSearch.Query(text, false, false, false), anchor, () -> false);
+    }
+
+    @Test
+    public void scanCountsMatchesPerRowAndTotal() throws Exception {
+        // "alice" matches row 0 ("Alice") and row 1 ("alice BOB"), one cell each.
+        DbfTableSearch.ScanResult r = scan("alice", -1);
+        assertFalse(r.badPattern());
+        assertEquals(2, r.total());
+        assertArrayEquals(new int[]{1, 1, 0, 0, 0}, r.rowMatchCount());
+    }
+
+    @Test
+    public void scanSelectsFirstMatchFromTopWhenNoAnchor() throws Exception {
+        DbfTableSearch.ScanResult r = scan("alice", -1);
+        assertEquals(DbfTableSearch.encode(0, 0), r.currentCell());
+        assertEquals(0, r.currentIndex());
+    }
+
+    @Test
+    public void scanSelectsFirstMatchAtOrAfterAnchor() throws Exception {
+        // Anchor just past the first match (0,0): the next match (1,0) is picked, rank 1.
+        DbfTableSearch.ScanResult r = scan("alice", DbfTableSearch.encode(0, 1));
+        assertEquals(DbfTableSearch.encode(1, 0), r.currentCell());
+        assertEquals(1, r.currentIndex());
+    }
+
+    @Test
+    public void scanWrapsToFirstWhenAnchorPastLastMatch() throws Exception {
+        DbfTableSearch.ScanResult r = scan("alice", DbfTableSearch.encode(99, 0));
+        assertEquals(DbfTableSearch.encode(0, 0), r.currentCell());
+        assertEquals(0, r.currentIndex());
+    }
+
+    @Test
+    public void scanNoMatchHasZeroTotalAndNoCurrent() throws Exception {
+        DbfTableSearch.ScanResult r = scan("zzz", -1);
+        assertFalse(r.badPattern());
+        assertEquals(0, r.total());
+        assertEquals(-1, r.currentCell());
+        assertEquals(-1, r.currentIndex());
+    }
+
+    @Test
+    public void scanInvalidRegexIsBad() throws Exception {
+        DbfDocument doc = document();
+        DbfTableSearch.ScanResult r = DbfTableSearch.scan(snapshotRows(doc), snapshotDefs(doc),
+                new DbfTableSearch.Query("[", false, true, false), -1, () -> false);
+        assertNotNull(r);
+        assertTrue(r.badPattern());
+        assertEquals(0, r.total());
+    }
+
+    @Test
+    public void scanCancelledReturnsNull() throws Exception {
+        DbfDocument doc = document();
+        assertNull(DbfTableSearch.scan(snapshotRows(doc), snapshotDefs(doc),
+                new DbfTableSearch.Query("alice", false, false, false), -1, () -> true));
+    }
+
+    @Test
+    public void scanTotalAndFirstMatchAgreeWithFind() throws Exception {
+        // Parity with find for a broad query: scan's total equals find's match count and its from-the-top
+        // current cell equals find's first match — so the counter and selection match the old array path.
+        DbfDocument doc = document();
+        DbfTableSearch.Query query = new DbfTableSearch.Query("a", false, false, false);
+        DbfTableSearch.Result found = DbfTableSearch.find(doc, query);
+        DbfTableSearch.ScanResult scanned = DbfTableSearch.scan(snapshotRows(doc), snapshotDefs(doc),
+                query, -1, () -> false);
+        assertNotNull(scanned);
+        assertEquals(found.matches().length, scanned.total());
+        assertEquals(found.matches()[0], scanned.currentCell());
+    }
+
     private static DbfRow[] snapshotRows(DbfDocument doc) {
         return doc.getRows().toArray(new DbfRow[0]);
     }
