@@ -142,6 +142,8 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
     private String busyStatusKey;
     private volatile boolean disposed;
     private boolean suppressEncodingEvent;
+    /** Row height last pinned by {@link #applyLogicalRowHeight}, to skip redundant re-pins. */
+    private int appliedRowHeight = -1;
     /**
      * Generation of the current async save, bumped per {@link #beginSave} and again when the editor
      * closes ({@code beforeFileClosed}). The off-EDT save continuations capture it and bail once it
@@ -548,6 +550,34 @@ public final class DbfFileEditor extends UserDataHolderBase implements FileEdito
                     column.setCellEditor(new DbfTextCellEditor(def, model.getDocument().getCharset()));
                 }
             }
+        }
+        applyLogicalRowHeight();
+    }
+
+    /**
+     * Pins the row height to the LOGICAL (checkbox) cell's height so text rows get the same comfortable
+     * top/bottom padding as logical ones. {@link JBTable#calculateRowHeight} sizes every row to the
+     * tallest column renderer, so a file that has a logical column already gets the checkbox's larger
+     * height on every row — but a text-only file would fall back to the shorter label height. Measuring
+     * the checkbox renderer the way JBTable does (selected + focused) and setting it explicitly keeps the
+     * vertical cell padding identical regardless of the column mix.
+     *
+     * <p>Setting it explicitly is also a performance win: until the row height is explicit, JBTable
+     * resets it to "uncomputed" on every table-model event ({@code onTableChanged}) and recomputes it
+     * via {@code calculateRowHeight()} — an O(rows&times;cols) sweep that builds a renderer and measures
+     * its preferred size for <em>every</em> cell (uncapped: {@code myMaxItemsForSizeCalculation} stays
+     * {@code Integer.MAX_VALUE}). On a large {@code .dbf} that runs on the EDT after each cell edit. Once
+     * the height is explicit, {@code onTableChanged} skips the reset and that sweep never runs. We must
+     * therefore <em>not</em> read {@code table.getRowHeight()} here (it would trigger the very sweep we
+     * avoid before the height is pinned) — hence the {@link #appliedRowHeight} guard instead.
+     */
+    private void applyLogicalRowHeight() {
+        TableCellRenderer logical = new DbfBooleanCellRenderer(table.getDefaultRenderer(Boolean.class), null);
+        Component sample = logical.getTableCellRendererComponent(table, Boolean.FALSE, true, true, 0, 0);
+        int height = sample.getPreferredSize().height;
+        if (height > 0 && height != appliedRowHeight) {
+            appliedRowHeight = height;
+            table.setRowHeight(height);
         }
     }
 
